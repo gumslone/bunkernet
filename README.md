@@ -85,6 +85,12 @@ The ESP-01 needs a stable supply of 300 mA or more, and weak USB-serial adapters
 out. Use the 3.3V pin of a good adapter or a separate regulator. Release GPIO0 after
 flashing and power-cycle.
 
+**Prefer a GUI?** [BugZapper](https://github.com/gumslone/BugZapper) is a small flasher for
+ESP8266/ESP8285 modules with a built-in serial monitor and a bundled esptool, so there is
+nothing to install. Build with `pio run`, then flash
+`.pio/build/esp01_1m/firmware.bin` (or a release binary) at offset `0x0`. Use it to flash
+many modules quickly and to read each node's serial log.
+
 Other boards: `pio run -e nodemcuv2 -t upload` for NodeMCU. Add more targets to
 [`platformio.ini`](platformio.ini) as needed.
 

@@ -13,14 +13,14 @@ jobs:
       matrix:
         env: [esp01_1m, nodemcuv2]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.platformio
             .pio
           key: pio-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install platformio
@@ -28,7 +28,7 @@ jobs:
         run: pio run -e ${{ matrix.env }}
       - name: Show firmware size
         run: ls -l .pio/build/${{ matrix.env }}/firmware.bin
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bunkernet-${{ matrix.env }}-default-psk
           path: .pio/build/${{ matrix.env }}/firmware.bin
@@ -37,7 +37,7 @@ jobs:
   check-ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Extract and syntax-check the embedded web UI script
         run: |
           python3 - <<'PY'
