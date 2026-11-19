@@ -29,6 +29,17 @@ scenario, but it works equally well for a cabin, a festival or a blackout.
 - **Zero dependencies:** only the stock ESP8266 Arduino core. The web app is embedded in the
   firmware, with no CDN calls and nothing fetched at runtime.
 
+## Screenshots
+
+The web app is served by every node and works in any phone or laptop browser.
+
+| Group chat | Private chat | Emergency alert | Data board | Node map |
+|:--:|:--:|:--:|:--:|:--:|
+| <img src="docs/screenshots/chat.png" width="170"> | <img src="docs/screenshots/private.png" width="170"> | <img src="docs/screenshots/alert.png" width="170"> | <img src="docs/screenshots/data.png" width="170"> | <img src="docs/screenshots/nodes.png" width="170"> |
+
+*Screenshots show the real web page with sample data from a mock node. Regenerate them with
+`node tools/screenshots/shoot.js` (needs Node 22+ and Chrome).*
+
 ## How it works
 
 ```
