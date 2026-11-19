@@ -13,7 +13,10 @@ scenario, but it works equally well for a cabin, a festival or a blackout.
 
 ## Features
 
-- **Group chat and private messages**, with delivery ticks (✓ sent, ✓✓ delivered).
+- **Group chat and private messages**, with delivery ticks (✓ sent, ✓✓ delivered), plus
+  **time stamps and date separators** on every message.
+- **Your name:** the first time you open the page it asks for a name, saved in your browser.
+  Tap your name at the top right to change it at any time.
 - **Emergency alerts:** a red banner with sound and vibration on every device on every node,
   repeated for about 5 minutes so briefly-offline nodes still get it. Optional **hardware SOS
   button** (hold 2 s).
@@ -53,8 +56,12 @@ The web app is served by every node and works in any phone or laptop browser.
   new packet after a small random delay to avoid collisions.
 - **Access:** every node is a soft access point on the same channel, with a captive portal
   that serves the web app. The page polls the node over HTTP, so any browser works.
-- **Identity:** the browser generates a random id and a name, kept in local storage. Private
-  messages are addressed to that id.
+- **Identity:** the browser generates a random id and asks for a display name, both kept in
+  local storage. Private messages are addressed to the id, so renaming never breaks a chat.
+  Names are not unique and nothing stops two people choosing the same one.
+- **Time:** the nodes have no clock (an ESP8266 has no battery-backed RTC), so each message
+  carries the sender's own phone or laptop time, and everyone sees the same stamp. If a
+  device's clock is wrong its messages will show the wrong time.
 - **Delivery receipts:** a private message is acknowledged when the recipient's device
   actually fetches it, and the receipt floods back to the sender's node.
 
@@ -152,8 +159,8 @@ choose (non-zero).
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /send` | `me`, `name`, `to` (`0` = everyone), `x` (text) |
-| `POST /put` | `me`, `name`, `k`, `v`: set a data-board entry |
+| `POST /send` | `me`, `name`, `to` (`0` = everyone), `x` (text), `ts` (optional unix seconds) |
+| `POST /put` | `me`, `name`, `k`, `v`, `ts` (optional): set a data-board entry |
 | `POST /alert`, `POST /alertclear` | `me`, `name`, `x` / `me`, `m` |
 | `GET /poll` | `me`, `name`, `since`, `dv`, `av`: new messages, users, data, alerts |
 | `GET /nodes` | Known nodes, hops and node stats |
@@ -168,7 +175,7 @@ curl -d "me=0000a001&name=cellar&k=temp&v=14.2C" http://192.168.4.1/put
 
 Packets are at most 250 bytes: `magic | ttl | origin(4) boot(4) seq(4) | len | ciphertext | tag(16)`.
 The 12-byte nonce (origin, boot id, sequence number) is authenticated as additional data.
-The payload holds the message type, original TTL, sender, recipient, message id, name and text.
+The payload holds the message type, original TTL, sender, recipient, message id, sender timestamp, name and text.
 Types: chat, DM, presence, beacon, ACK, data, alert. See
 [`bunkernet.ino`](firmware/bunkernet/bunkernet.ino).
 

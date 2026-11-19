@@ -17,7 +17,7 @@ async function main() {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bn-shot-'));
   const chrome = spawn(CHROME, [
     '--headless=new', `--remote-debugging-port=${CDP}`, `--user-data-dir=${profile}`,
-    '--no-first-run', '--hide-scrollbars', 'about:blank',
+    '--no-first-run', '--lang=en-US', '--hide-scrollbars', 'about:blank',
   ], { stdio: 'ignore' });
   try {
     let targets;

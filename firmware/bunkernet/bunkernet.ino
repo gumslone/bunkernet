@@ -23,7 +23,7 @@
 #define TAG_LEN      16
 #define PKT_MAX      250
 #define PT_MAX       (PKT_MAX - OFF_PAYLOAD - TAG_LEN)   // 219
-#define PT_HDR       15         // type ittl from to mid nlen
+#define PT_HDR       19         // type ittl from to mid ts nlen
 #define NAME_MAX_LEN 15
 #define TEXT_MAX_LEN 140
 
@@ -63,7 +63,7 @@ static uint8_t  seenIdx = 0;
 // message log shown to local clients
 struct LogEnt {
   uint32_t lid; uint8_t type; bool acked;
-  uint32_t from, to, mid;
+  uint32_t from, to, mid, ts;
   char name[NAME_MAX_LEN + 1];
   char text[TEXT_MAX_LEN + 1];
 };
@@ -79,7 +79,7 @@ static User users[USERS_N];
 struct NodeEnt { uint32_t id; uint32_t seen; uint8_t hops; char name[NAME_MAX_LEN + 1]; };
 static NodeEnt nodes[NODES_N];
 
-struct DataEnt { bool used; uint32_t from; char k[NAME_MAX_LEN + 1]; char v[48]; };
+struct DataEnt { bool used; uint32_t from, ts; char k[NAME_MAX_LEN + 1]; char v[48]; };
 static DataEnt board[DATA_N];
 static uint32_t dataVer = 1;
 
@@ -152,14 +152,14 @@ static void txPump() {
 
 // ---------------------------------------------------------------- mesh send
 static uint32_t meshSend(uint8_t type, uint32_t from, uint32_t to, uint32_t mid,
-                         const char* name, const char* text) {
+                         const char* name, const char* text, uint32_t ts = 0) {
   uint8_t pt[PT_MAX];
   size_t nl = strlen(name); if (nl > NAME_MAX_LEN) nl = NAME_MAX_LEN;
   size_t tl = strlen(text); if (tl > TEXT_MAX_LEN) tl = TEXT_MAX_LEN;
   if (mid == 0) mid = rnd32() | 1;
   pt[0] = type; pt[1] = MESH_TTL;
-  put32(pt + 2, from); put32(pt + 6, to); put32(pt + 10, mid);
-  pt[14] = (uint8_t)nl;
+  put32(pt + 2, from); put32(pt + 6, to); put32(pt + 10, mid); put32(pt + 14, ts);
+  pt[18] = (uint8_t)nl;
   memcpy(pt + PT_HDR, name, nl);
   memcpy(pt + PT_HDR + nl, text, tl);
   size_t n = PT_HDR + nl + tl;
@@ -226,23 +226,23 @@ static void touchNode(uint32_t id, const char* name, uint8_t hops) {
   e->hops = hops; e->seen = now;
 }
 
-static void setData(uint32_t from, const char* k, const char* v) {
+static void setData(uint32_t from, const char* k, const char* v, uint32_t ts) {
   DataEnt* e = nullptr;
   for (auto& d : board) if (d.used && strcmp(d.k, k) == 0) { e = &d; break; }
   if (!e) for (auto& d : board) if (!d.used) { e = &d; break; }
   if (!e) e = &board[rnd32() % DATA_N];          // board full: replace a random entry
-  e->used = true; e->from = from;
+  e->used = true; e->from = from; e->ts = ts;
   strncpy(e->k, k, NAME_MAX_LEN); e->k[NAME_MAX_LEN] = 0;
   strncpy(e->v, v, sizeof(e->v) - 1); e->v[sizeof(e->v) - 1] = 0;
   dataVer++;
 }
 
 static LogEnt* addLog(uint8_t type, uint32_t from, uint32_t to, uint32_t mid,
-                      const char* name, const char* text) {
+                      const char* name, const char* text, uint32_t ts = 0) {
   LogEnt& e = logRing[logCount % LOG_N];
   logCount++;
   e.lid = logCount; e.type = type; e.acked = false;
-  e.from = from; e.to = to; e.mid = mid;
+  e.from = from; e.to = to; e.mid = mid; e.ts = ts;
   strncpy(e.name, name, NAME_MAX_LEN); e.name[NAME_MAX_LEN] = 0;
   strncpy(e.text, text, TEXT_MAX_LEN); e.text[TEXT_MAX_LEN] = 0;
   return &e;
@@ -289,8 +289,8 @@ static void sendAck(uint32_t recipient, uint32_t sender, uint32_t mid) {
 static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origin) {
   if (n < PT_HDR) return;
   uint8_t type = pt[0], ittl = pt[1];
-  uint32_t from = get32(pt + 2), to = get32(pt + 6), mid = get32(pt + 10);
-  size_t nl = pt[14];
+  uint32_t from = get32(pt + 2), to = get32(pt + 6), mid = get32(pt + 10), ts = get32(pt + 14);
+  size_t nl = pt[18];
   if (PT_HDR + nl > n) return;
   char name[NAME_MAX_LEN + 1], text[TEXT_MAX_LEN + 1];
   copyUtf8(name, (const char*)pt + PT_HDR, nl, NAME_MAX_LEN);
@@ -300,7 +300,7 @@ static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origi
 
   switch (type) {
     case T_CHAT: case T_DM:
-      addLog(type, from, to, mid, name, text);
+      addLog(type, from, to, mid, name, text, ts);
       break;
     case T_PRESENCE:
       touchUser(from, name, origin);
@@ -312,7 +312,7 @@ static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origi
       if (userIsLocal(to)) addLog(T_ACK, from, to, mid, "", "");
       break;
     case T_DATA:
-      setData(from, name, text);
+      setData(from, name, text, ts);
       break;
     case T_ALERT:
       setAlert(mid, from, name, text);
@@ -432,7 +432,8 @@ static void handlePoll() {
     hex8(h, e.from); o += ",\"f\":\""; o += h;
     hex8(h, e.to);   o += "\",\"to\":\""; o += h;
     hex8(h, e.mid);  o += "\",\"m\":\""; o += h;
-    o += "\",\"n\":"; jesc(o, e.name);
+    o += "\",\"s\":"; o += e.ts;
+    o += ",\"n\":"; jesc(o, e.name);
     o += ",\"x\":"; jesc(o, e.text);
     o += '}';
     flushJson(o);
@@ -456,6 +457,7 @@ static void handlePoll() {
       comma = true;
       hex8(h, d.from);
       o += "{\"k\":"; jesc(o, d.k); o += ",\"v\":"; jesc(o, d.v);
+      o += ",\"s\":"; o += d.ts;
       o += ",\"f\":\""; o += h; o += "\"}";
       flushJson(o);
     }
@@ -491,8 +493,9 @@ static void handleSend() {
   copyUtf8(text, x.c_str(), x.length(), TEXT_MAX_LEN);
   if (!text[0]) { server.send(400, "text/plain", "empty"); return; }
   uint8_t type = to ? T_DM : T_CHAT;
-  uint32_t mid = meshSend(type, me, to, 0, name, text);
-  addLog(type, me, to, mid, name, text);
+  uint32_t ts = (uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10);
+  uint32_t mid = meshSend(type, me, to, 0, name, text, ts);
+  addLog(type, me, to, mid, name, text, ts);
   server.send(200, "text/plain", "ok");
 }
 
@@ -506,8 +509,9 @@ static void handlePut() {
   copyUtf8(key, k.c_str(), k.length(), NAME_MAX_LEN);
   copyUtf8(val, v.c_str(), v.length(), 47);
   if (!key[0]) { server.send(400, "text/plain", "bad"); return; }
-  setData(me, key, val);
-  meshSend(T_DATA, me, 0, 0, key, val);
+  uint32_t ts = (uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10);
+  setData(me, key, val, ts);
+  meshSend(T_DATA, me, 0, 0, key, val, ts);
   server.send(200, "text/plain", "ok");
 }
 
