@@ -37,6 +37,7 @@ enum : uint8_t { T_CHAT = 1, T_DM = 2, T_PRESENCE = 3, T_BEACON = 4, T_ACK = 5, 
 #define NODES_N 16
 #define DATA_N  16
 #define ALERT_N 4
+#define MAIL_N  12
 
 // ---------------------------------------------------------------- state
 static const uint8_t BCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -69,6 +70,21 @@ struct LogEnt {
 };
 static LogEnt  logRing[LOG_N];
 static uint32_t logCount = 0;
+
+// Store-and-forward mailbox: every node keeps a copy of each direct message until a
+// delivery receipt for it is seen. The recipient can then collect it from ANY node whenever
+// they next appear, even hours later or after roaming. The node that originated a message
+// also re-floods it on a back-off schedule so nodes that missed it (down, out of range) catch up.
+struct Mail {
+  bool used, delivered, mine; uint8_t tries;
+  uint32_t from, to, mid, ts, next, lastAck;
+  char name[NAME_MAX_LEN + 1];
+  char text[TEXT_MAX_LEN + 1];
+};
+static Mail mailbox[MAIL_N];
+static uint8_t mailRR = 0;
+static const uint16_t RETRY_S[] = {30, 60, 120, 300, 600, 1200, 1800, 3600, 3600, 7200, 7200, 14400};
+#define RETRY_N (sizeof(RETRY_S) / sizeof(RETRY_S[0]))
 
 struct User {
   uint32_t id; uint32_t node; uint32_t seen; bool needPresence;
@@ -248,6 +264,31 @@ static LogEnt* addLog(uint8_t type, uint32_t from, uint32_t to, uint32_t mid,
   return &e;
 }
 
+static Mail* findMail(uint32_t mid) {
+  for (auto& m : mailbox) if (m.used && m.mid == mid) return &m;
+  return nullptr;
+}
+
+static void markDelivered(uint32_t mid) {
+  Mail* m = findMail(mid);
+  if (m) m->delivered = true;
+}
+
+static Mail* storeMail(uint32_t from, uint32_t to, uint32_t mid, uint32_t ts,
+                       const char* name, const char* text, bool mine) {
+  Mail* m = nullptr;
+  for (auto& x : mailbox) if (!x.used) { m = &x; break; }
+  if (!m) for (auto& x : mailbox) if (x.delivered) { m = &x; break; }
+  if (!m) { m = &mailbox[mailRR]; mailRR = (mailRR + 1) % MAIL_N; }   // full: drop round-robin
+  memset(m, 0, sizeof(*m));
+  m->used = true; m->mine = mine;
+  m->from = from; m->to = to; m->mid = mid; m->ts = ts;
+  m->next = millis() + RETRY_S[0] * 1000UL;
+  strncpy(m->name, name, NAME_MAX_LEN);
+  strncpy(m->text, text, TEXT_MAX_LEN);
+  return m;
+}
+
 // alert with empty text = cancel of the alert with that mid
 static void setAlert(uint32_t mid, uint32_t from, const char* name, const char* text) {
   bool cancel = !text[0];
@@ -281,6 +322,7 @@ static void raiseAlert(uint32_t from, const char* name, const char* text) {
 
 // delivery receipt: tell the sender's node that `from` (recipient) got message `mid`
 static void sendAck(uint32_t recipient, uint32_t sender, uint32_t mid) {
+  markDelivered(mid);
   if (userIsLocal(sender)) addLog(T_ACK, recipient, sender, mid, "", "");
   meshSend(T_ACK, recipient, sender, mid, "", "");
 }
@@ -299,9 +341,22 @@ static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origi
   uint8_t hops = (ittl >= ttl) ? (ittl - ttl + 1) : 1;
 
   switch (type) {
-    case T_CHAT: case T_DM:
+    case T_CHAT:
       addLog(type, from, to, mid, name, text, ts);
       break;
+    case T_DM: {
+      Mail* mm = findMail(mid);
+      if (mm) {                                   // re-flooded copy of a message we already hold
+        if (mm->delivered && millis() - mm->lastAck > 20000UL) {
+          mm->lastAck = millis();
+          sendAck(to, from, mid);                 // tell the origin to stop retrying
+        }
+        break;
+      }
+      storeMail(from, to, mid, ts, name, text, false);
+      addLog(T_DM, from, to, mid, name, text, ts);
+      break;
+    }
     case T_PRESENCE:
       touchUser(from, name, origin);
       break;
@@ -309,6 +364,7 @@ static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origi
       touchNode(from, name, hops);
       break;
     case T_ACK:
+      markDelivered(mid);
       if (userIsLocal(to)) addLog(T_ACK, from, to, mid, "", "");
       break;
     case T_DATA:
@@ -438,6 +494,22 @@ static void handlePoll() {
     o += '}';
     flushJson(o);
   }
+  // store-and-forward: DMs that were held for this user while they were away
+  for (auto& mm : mailbox) {
+    if (!mm.used || mm.delivered || mm.to != me) continue;
+    sendAck(me, mm.from, mm.mid);
+    if (comma) o += ',';
+    comma = true;
+    o += "{\"t\":2";
+    hex8(h, mm.from); o += ",\"f\":\""; o += h;
+    hex8(h, mm.to);   o += "\",\"to\":\""; o += h;
+    hex8(h, mm.mid);  o += "\",\"m\":\""; o += h;
+    o += "\",\"s\":"; o += mm.ts;
+    o += ",\"n\":"; jesc(o, mm.name);
+    o += ",\"x\":"; jesc(o, mm.text);
+    o += '}';
+    flushJson(o);
+  }
   o += "],\"users\":[";
   comma = false;
   uint32_t now = millis();
@@ -496,6 +568,7 @@ static void handleSend() {
   uint32_t ts = (uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10);
   uint32_t mid = meshSend(type, me, to, 0, name, text, ts);
   addLog(type, me, to, mid, name, text, ts);
+  if (type == T_DM) storeMail(me, to, mid, ts, name, text, true);
   server.send(200, "text/plain", "ok");
 }
 
@@ -637,6 +710,14 @@ void loop() {
     if (u.needPresence || periodic) {
       u.needPresence = false;
       meshSend(T_PRESENCE, u.id, 0, 0, u.name, "");
+    }
+  }
+  for (auto& m : mailbox) {                       // back-off retries of our own undelivered DMs
+    if (m.used && m.mine && !m.delivered && (int32_t)(now - m.next) >= 0) {
+      meshSend(T_DM, m.from, m.to, m.mid, m.name, m.text, m.ts);
+      if (++m.tries >= RETRY_N) m.mine = false;
+      else m.next = now + RETRY_S[m.tries] * 1000UL;
+      break;                                      // at most one per loop pass
     }
   }
   if (rep.active && (int32_t)(now - rep.next) >= 0) {

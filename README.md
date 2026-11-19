@@ -17,6 +17,9 @@ scenario, but it works equally well for a cabin, a festival or a blackout.
   **time stamps and date separators** on every message.
 - **Your name:** the first time you open the page it asks for a name, saved in your browser.
   Tap your name at the top right to change it at any time.
+- **Store-and-forward:** send a private message to someone who is offline and it is held by the
+  mesh and delivered the moment they next open the page, on any node, even hours later.
+  The sender sees ⏳ *stored* until the delivery receipt (✓✓) arrives.
 - **Emergency alerts:** a red banner with sound and vibration on every device on every node,
   repeated for about 5 minutes so briefly-offline nodes still get it. Optional **hardware SOS
   button** (hold 2 s).
@@ -36,9 +39,13 @@ scenario, but it works equally well for a cabin, a festival or a blackout.
 
 The web app is served by every node and works in any phone or laptop browser.
 
-| Group chat | Private chat | Emergency alert | Data board | Node map |
-|:--:|:--:|:--:|:--:|:--:|
-| <img src="docs/screenshots/chat.png" width="170"> | <img src="docs/screenshots/private.png" width="170"> | <img src="docs/screenshots/alert.png" width="170"> | <img src="docs/screenshots/data.png" width="170"> | <img src="docs/screenshots/nodes.png" width="170"> |
+| Group chat | Private chat | Stored for offline user |
+|:--:|:--:|:--:|
+| <img src="docs/screenshots/chat.png" width="200"> | <img src="docs/screenshots/private.png" width="200"> | <img src="docs/screenshots/offline.png" width="200"> |
+
+| Emergency alert | Data board | Node map |
+|:--:|:--:|:--:|
+| <img src="docs/screenshots/alert.png" width="200"> | <img src="docs/screenshots/data.png" width="200"> | <img src="docs/screenshots/nodes.png" width="200"> |
 
 *Screenshots show the real web page with sample data from a mock node. Regenerate them with
 `node tools/screenshots/shoot.js` (needs Node 22+ and Chrome).*
@@ -62,6 +69,13 @@ The web app is served by every node and works in any phone or laptop browser.
 - **Time:** the nodes have no clock (an ESP8266 has no battery-backed RTC), so each message
   carries the sender's own phone or laptop time, and everyone sees the same stamp. If a
   device's clock is wrong its messages will show the wrong time.
+- **Store-and-forward:** every node keeps a copy of each private message (a 12-message
+  mailbox) until a delivery receipt for it is seen. When the recipient next opens the page on
+  any node, that node hands over the message and floods the receipt, so all other nodes
+  drop their copy. The node that originated a message also re-sends it on a back-off schedule
+  (30 s, 1 min, 2 min, 5 min … up to about 10 hours) so nodes that were off or out of range
+  catch up. The browser remembers people it has seen, so you can message someone who is
+  currently offline.
 - **Delivery receipts:** a private message is acknowledged when the recipient's device
   actually fetches it, and the receipt floods back to the sender's node.
 
@@ -187,7 +201,10 @@ Types: chat, DM, presence, beacon, ACK, data, alert. See
   packet spreads, not its contents.
 - The link between a phone and its node is open unless you set `AP_PASSWORD`. Only the node
   to node traffic is encrypted.
-- No persistence. Messages are kept in RAM, about the last 28 per node.
+- No persistence. Messages are kept in RAM, about the last 28 chat messages and 12 stored
+  private messages per node. Stored messages survive as long as at least one node holding
+  them stays powered. If every holder loses power, or more than 12 are waiting, the oldest
+  are lost.
 
 ## Development
 

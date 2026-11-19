@@ -8,23 +8,31 @@ const path = require('path');
 
 const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const OUT = path.join(__dirname, '../../docs/screenshots');
-const MOCK = 8099, CDP = 9333;
+const MOCK = 8099;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
   const mock = spawn('node', [path.join(__dirname, 'mock_server.js'), String(MOCK)], { stdio: 'ignore' });
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'bn-shot-'));
-  const chrome = spawn(CHROME, [
-    '--headless=new', `--remote-debugging-port=${CDP}`, `--user-data-dir=${profile}`,
-    '--no-first-run', '--lang=en-US', '--hide-scrollbars', 'about:blank',
-  ], { stdio: 'ignore' });
-  try {
-    let targets;
-    for (let i = 0; i < 100 && !targets; i++) {
-      try { targets = await (await fetch(`http://127.0.0.1:${CDP}/json`)).json(); } catch { await sleep(300); }
+  let chrome, CDP, targets;
+  // Chrome picks a free debugging port and writes it to DevToolsActivePort in the profile dir.
+  // Occasionally it does not come up (e.g. right after a previous run), so retry a few times.
+  for (let attempt = 0; attempt < 4 && !targets; attempt++) {
+    chrome = spawn(CHROME, [
+      '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
+      '--no-first-run', '--lang=en-US', '--hide-scrollbars', 'about:blank',
+    ], { stdio: 'ignore' });
+    for (let i = 0; i < 40 && !targets; i++) {
+      try {
+        CDP = fs.readFileSync(path.join(profile, 'DevToolsActivePort'), 'utf8').split('\n')[0];
+        targets = await (await fetch(`http://127.0.0.1:${CDP}/json`)).json();
+      } catch { await sleep(300); }
     }
-    if (!targets) throw new Error("Chrome remote debugging port did not come up");
+    if (!targets) { chrome.kill('SIGKILL'); await sleep(1500); }
+  }
+  try {
+    if (!targets) throw new Error('Chrome remote debugging port did not come up');
     const page = targets.find((t) => t.type === 'page');
     const ws = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((r) => (ws.onopen = r));
@@ -41,11 +49,11 @@ async function main() {
 
     await cdp('Page.enable');
     await cdp('Emulation.setDeviceMetricsOverride', { width: 390, height: 640, deviceScaleFactor: 2, mobile: true });
-    await cdp('Emulation.setEmulatedMedia', { features: [] });
+    await cdp('Emulation.setLocaleOverride', { locale: 'en-US' });
     const open = async () => {
       await cdp('Page.navigate', { url: `http://127.0.0.1:${MOCK}/` });
       await sleep(600);
-      await js("localStorage.setItem('uid','0000d004');localStorage.setItem('name','Olek');location.reload()");
+      await js("localStorage.setItem('uid','0000d004');localStorage.setItem('contacts','{\"0000e005\":\"Sam\"}');localStorage.setItem('name','Olek');location.reload()");
       await sleep(1200);
     };
 
@@ -55,6 +63,9 @@ async function main() {
 
     await js("document.querySelector('.chip[data-c=\"0000b002\"]').click()");
     await shot('private');
+
+    await js("document.querySelector('.chip[data-c=\"0000e005\"]').click()");
+    await shot('offline');
 
     await js("document.querySelector('nav button[data-t=data]').click()");
     await shot('data');

@@ -9,7 +9,7 @@ const port = Number(process.argv[2] || 8080);
 const src = fs.readFileSync(path.join(__dirname, '../../firmware/bunkernet/web_ui.h'), 'utf8');
 const html = src.match(/R"HTML\(([\s\S]*?)\)HTML"/)[1];
 
-const ANNA = '0000a001', MARK = '0000b002', MAYA = '0000c003';
+const ANNA = '0000a001', MARK = '0000b002', MAYA = '0000c003', SAM = '0000e005'; // Sam is offline
 const state = { alert: false };
 
 // f === 'me' is replaced by the requesting client's id
@@ -23,6 +23,7 @@ const msgs = [
   { i: 7, t: 2, f: 'me', to: MARK, m: '00000007', n: 'Olek', x: 'On my way', ago: 900 },
   { i: 8, t: 2, f: 'me', to: MARK, m: '00000008', n: 'Olek', x: 'Fuel is at 70%, enough for 2 days', ago: 600 },
   { i: 9, t: 2, f: ANNA, to: 'me', m: '00000009', n: 'Anna', x: 'Are you bringing the fuses?', ago: 300 },
+  { i: 11, t: 2, f: 'me', to: SAM, m: '0000000b', n: 'Olek', x: 'Filter instructions are taped to the fridge', ago: 240 },
   { i: 10, t: 5, f: MARK, to: 'me', m: '00000007', n: '', x: '', ago: 590 },
 ];
 const users = [{ id: ANNA, n: 'Anna' }, { id: MARK, n: 'Mark' }, { id: MAYA, n: 'Maya' }];

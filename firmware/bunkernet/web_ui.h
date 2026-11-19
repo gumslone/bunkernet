@@ -16,7 +16,7 @@ main{flex:1;overflow:auto;padding:10px;display:none}main.on{display:block}
 #chat.on{display:flex;flex-direction:column;padding:0}
 #convs{display:flex;gap:6px;overflow-x:auto;padding:8px;background:var(--p)}
 .chip{white-space:nowrap;padding:5px 11px;border-radius:14px;background:var(--p2);color:var(--t);border:0;font:inherit;font-size:13px}
-.chip.on{background:var(--a);color:#001}.chip i{font-style:normal;background:var(--r);color:#fff;border-radius:8px;padding:0 5px;margin-left:5px;font-size:11px}
+.chip.off{opacity:.55}.chip.on{background:var(--a);color:#001}.chip i{font-style:normal;background:var(--r);color:#fff;border-radius:8px;padding:0 5px;margin-left:5px;font-size:11px}
 #msgs{flex:1;overflow:auto;padding:10px}
 .m{max-width:82%;margin:4px 0;padding:6px 10px;border-radius:10px;background:var(--p2);word-wrap:break-word}
 .m.me{margin-left:auto;background:#17436b}.m small{display:block;color:var(--m);font-size:11px}
@@ -46,8 +46,11 @@ table{width:100%;border-collapse:collapse}td,th{padding:7px 4px;border-bottom:1p
 const $=s=>document.querySelector(s),E=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ls=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}};
 let me=ls('uid');if(!me){me=('0000000'+((Math.random()*4294967294+1)>>>0).toString(16)).slice(-8);ls('uid',me)}
-let name=ls('name')||'',since=0,dv=-1,av=-1,alerts=[],seenAl={},hidAl={},alertMode=0,msgs=[],acked=new Set(),users=[],unread={},cur='all',busy=0,tab='chat',node='';
-const uname=id=>{const u=users.find(u=>u.id==id);return u?u.n:id.slice(0,4)};
+let name=ls('name')||'',since=0,dv=-1,av=-1,alerts=[],seenAl={},hidAl={},alertMode=0,msgs=[],acked=new Set(),users=[],unread={},cur='all',busy=0,tab='chat',node='',seenM=new Set(),contacts={};
+try{contacts=JSON.parse(ls('contacts')||'{}')}catch(e){}
+const online=id=>users.some(u=>u.id==id);
+const uname=id=>{const u=users.find(u=>u.id==id);return u?u.n:(contacts[id]||id.slice(0,4))};
+const ph=()=>alertMode?'Emergency alert text…':(cur!='all'&&!online(cur)?uname(cur)+' is offline: will be stored':'Message…');
 function askName(edit){if(name&&!edit)return;$('#ni2').value=name;$('#nc').hidden=!name;$('#nm').hidden=0;$('#ni2').focus()}
 function who(){$('#who').textContent='👤 '+(name||'?')}
 $('#who').onclick=()=>askName(1);$('#nc').onclick=()=>{$('#nm').hidden=1};
@@ -60,17 +63,21 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{tab=b.dataset.
 const key=m=>m.t==1?'all':(m.f==me?m.to:m.f);
 function render(){
  let h='<button class="chip'+(cur=='all'?' on':'')+'" data-c="all">Everyone'+(unread.all?'<i>'+unread.all+'</i>':'')+'</button>';
- users.filter(u=>u.id!=me).forEach(u=>h+='<button class="chip'+(cur==u.id?' on':'')+'" data-c="'+u.id+'">'+E(u.n)+(unread[u.id]?'<i>'+unread[u.id]+'</i>':'')+'</button>');
+ const peers={};Object.keys(contacts).forEach(id=>peers[id]={id,n:contacts[id],off:1});users.forEach(u=>peers[u.id]={id:u.id,n:u.n,off:0});delete peers[me];
+ Object.values(peers).forEach(u=>h+='<button class="chip'+(u.off?' off':'')+(cur==u.id?' on':'')+'" data-c="'+u.id+'">'+E(u.n)+(unread[u.id]?'<i>'+unread[u.id]+'</i>':'')+'</button>');
  $('#convs').innerHTML=h;
  $('#convs').querySelectorAll('.chip').forEach(c=>c.onclick=()=>{cur=c.dataset.c;unread[cur]=0;render()});
  const box=$('#msgs'),stick=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
- let ld='';box.innerHTML=msgs.filter(m=>key(m)==cur).map(m=>{const mine=m.f==me,dk=dayk(m.ms);let h='';if(dk!=ld){ld=dk;h='<div class="day">'+dlab(m.ms)+'</div>'}
-  return h+'<div class="m'+(mine?' me':'')+'">'+(mine?'':'<small>'+E(m.n)+' · '+tm(m.ms)+'</small>')+E(m.x)+(mine?'<s class="t">'+tm(m.ms)+'</s>'+(m.t==2?'<s class="'+(acked.has(m.m)?'ok">✓✓':'">✓')+'</s>':''):'')+'</div>'}).join('');
+ let ld='';$('#x').placeholder=ph();
+ box.innerHTML=msgs.filter(m=>key(m)==cur).sort((a,b)=>a.ms-b.ms).map(m=>{const mine=m.f==me,dk=dayk(m.ms);let h='';if(dk!=ld){ld=dk;h='<div class="day">'+dlab(m.ms)+'</div>'}
+  return h+'<div class="m'+(mine?' me':'')+'">'+(mine?'':'<small>'+E(m.n)+' · '+tm(m.ms)+'</small>')+E(m.x)+(mine?'<s class="t">'+tm(m.ms)+'</s>'+(m.t==2?'<s class="'+(acked.has(m.m)?'ok">✓✓':'">'+(online(m.to)?'✓':'⏳ stored'))+'</s>':''):'')+'</div>'}).join('');
  if(stick)box.scrollTop=box.scrollHeight}
 async function poll(){if(busy||!name)return;busy=1;
  try{const r=await fetch('/poll?since='+since+'&me='+me+'&name='+encodeURIComponent(name)+'&dv='+dv+'&av='+av,{cache:'no-store'});const j=await r.json();
+  if(node&&j.node!=node){node=j.node;since=0;busy=0;return}   // roamed to another node: its log numbering differs, resync
   node=j.node;users=j.users;since=j.last;
-  j.msgs.forEach(m=>{if(m.t==5){acked.add(m.m);return}m.ms=m.s?m.s*1000:Date.now();msgs.push(m);const k=key(m);if(k!=cur&&m.f!=me)unread[k]=(unread[k]||0)+1});
+  users.forEach(u=>{if(u.id!=me&&contacts[u.id]!=u.n){contacts[u.id]=u.n;ls('contacts',JSON.stringify(contacts))}});
+  j.msgs.forEach(m=>{if(m.t==5){acked.add(m.m);return}if(seenM.has(m.m))return;seenM.add(m.m);m.ms=m.s?m.s*1000:Date.now();msgs.push(m);const k=key(m);if(k!=cur&&m.f!=me)unread[k]=(unread[k]||0)+1});
   if(msgs.length>300)msgs=msgs.slice(-300);
   if(j.data){dv=j.dv;$('#dt').innerHTML=j.data.map(d=>'<tr><td>'+E(d.k)+'</td><td>'+E(d.v)+'</td><td>'+E(uname(d.f))+'</td><td>'+(d.s?stamp(d.s*1000):'–')+'</td></tr>').join('')||'<tr><td colspan=4 style="color:var(--m)">No data yet</td></tr>'}
   if(j.alerts){av=j.av;alerts=j.alerts;let nw=0;alerts.forEach(a=>{if(!seenAl[a.m]){seenAl[a.m]=1;nw=1}});if(nw){try{navigator.vibrate([400,150,400,150,400])}catch(e){}beep()}drawAl()}
@@ -79,7 +86,7 @@ async function poll(){if(busy||!name)return;busy=1;
 function beep(){try{const c=new(window.AudioContext||window.webkitAudioContext)(),o=c.createOscillator();o.type='square';o.frequency.value=880;o.connect(c.destination);o.start();o.stop(c.currentTime+.6)}catch(e){}}
 function drawAl(){$('#al').innerHTML=alerts.filter(a=>!hidAl[a.m]).map(a=>'<div class="al"><span>🚨 '+E(a.n)+': '+E(a.x)+'</span><button data-h="'+a.m+'">OK</button><button data-c="'+a.m+'">Clear all</button></div>').join('');
  $('#al').querySelectorAll('button').forEach(b=>b.onclick=()=>{if(b.dataset.h){hidAl[b.dataset.h]=1;drawAl()}else{post('/alertclear',{me,m:b.dataset.c})}})}
-$('#ab').onclick=()=>{alertMode=!alertMode;$('#sb').className='go'+(alertMode?' red':'');$('#sb').textContent=alertMode?'ALERT':'Send';$('#x').placeholder=alertMode?'Emergency alert text…':'Message…'};
+$('#ab').onclick=()=>{alertMode=!alertMode;$('#sb').className='go'+(alertMode?' red':'');$('#sb').textContent=alertMode?'ALERT':'Send';$('#x').placeholder=ph()};
 async function post(u,o){try{await fetch(u,{method:'POST',body:new URLSearchParams(o)})}catch(e){}poll()}
 $('#f').onsubmit=e=>{e.preventDefault();const x=$('#x').value.trim();if(!x)return;$('#x').value='';if(alertMode){$('#ab').click();post('/alert',{me,name,x})}else post('/send',{me,name,ts:Math.floor(Date.now()/1000),to:cur=='all'?'0':cur,x})};
 $('#df').onsubmit=e=>{e.preventDefault();const k=$('#dk').value.trim(),v=$('#dv').value.trim();if(!k)return;$('#dk').value=$('#dv').value='';post('/put',{me,name,ts:Math.floor(Date.now()/1000),k,v})};
