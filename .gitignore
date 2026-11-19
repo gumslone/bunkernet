@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+firmware/bunkernet/config.local.h
+*.bin
+.DS_Store

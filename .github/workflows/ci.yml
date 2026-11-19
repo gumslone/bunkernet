@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [esp01_1m, nodemcuv2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install platformio
+      - name: Build ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}
+      - name: Show firmware size
+        run: ls -l .pio/build/${{ matrix.env }}/firmware.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bunkernet-${{ matrix.env }}-default-psk
+          path: .pio/build/${{ matrix.env }}/firmware.bin
+          retention-days: 14
+
+  check-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract and syntax-check the embedded web UI script
+        run: |
+          python3 - <<'PY'
+          import re
+          s = open('firmware/bunkernet/web_ui.h').read()
+          m = re.search(r'<script>(.*?)</script>', s, re.S)
+          open('/tmp/ui.js', 'w').write(m.group(1))
+          PY
+          node --check /tmp/ui.js

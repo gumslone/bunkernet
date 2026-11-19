@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install platformio
+      - name: Build all targets
+        run: |
+          pio run
+          pio run -e nodemcuv2
+          mkdir dist
+          cp .pio/build/esp01_1m/firmware.bin dist/bunkernet-esp01_1m-${{ github.ref_name }}.bin
+          cp .pio/build/nodemcuv2/firmware.bin dist/bunkernet-nodemcuv2-${{ github.ref_name }}.bin
+          (cd dist && sha256sum *.bin > SHA256SUMS)
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "BunkerNet ${{ github.ref_name }}" \
+            --notes "Prebuilt firmware uses the PUBLIC default mesh key, so it is for testing only. For real use, run \`tools/new-psk.sh\` and build your own with \`pio run -t upload\`. See the README."
