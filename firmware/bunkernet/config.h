@@ -53,6 +53,27 @@
 #define SOS_PIN        -1
 #endif
 
+// Text of the alert raised by the SOS button (followed by the node name).
+#ifndef SOS_TEXT
+#define SOS_TEXT       "SOS button pressed at"
+#endif
+
+// Range experiments, off by default. See docs/TESTING.md before relying on them.
+#ifndef TX_POWER_DBM
+#define TX_POWER_DBM   20.5        // 0..20.5 dBm
+#endif
+#ifndef MESH_PHY_11B
+#define MESH_PHY_11B   0           // 1 = slower 802.11b radio mode, may reach further
+#endif
+
+// Optional browser firmware upload at http://192.168.4.1/update. Disabled unless you define a
+// password (in config.local.h). Needs a board with 2 MB+ flash (NodeMCU, Wemos D1), not a 1 MB ESP-01.
+// #define OTA_USER     "admin"
+// #define OTA_PASSWORD "choose-a-long-password"
+#ifndef OTA_USER
+#define OTA_USER       "admin"
+#endif
+
 #ifndef DEBUG_SERIAL
 #define DEBUG_SERIAL   1
 #endif

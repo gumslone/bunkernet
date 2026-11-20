@@ -133,7 +133,7 @@ class AuthTable {
 // Store-and-forward mailbox for direct messages.
 // ---------------------------------------------------------------------------
 struct Mail {
-  bool used, delivered, mine; uint8_t tries;
+  bool used, delivered, mine, prio; uint8_t tries;
   uint32_t from, to, mid, ts, next, lastAck;
   char name[BN_NAME_MAX + 1];
   char text[BN_TEXT_MAX + 1];
@@ -157,13 +157,13 @@ class Mailbox {
     return true;
   }
   Mail* store(uint32_t from, uint32_t to, uint32_t mid, uint32_t ts, const char* name,
-              const char* text, bool mine, uint32_t now) {
+              const char* text, bool mine, uint32_t now, bool prio = false) {
     Mail* m = nullptr;
     for (size_t i = 0; i < N; i++) if (!m_[i].used) { m = &m_[i]; break; }
     if (!m) for (size_t i = 0; i < N; i++) if (m_[i].delivered) { m = &m_[i]; break; }
     if (!m) { m = &m_[rr_]; rr_ = (rr_ + 1) % N; }      // full of undelivered: drop round-robin
     memset(m, 0, sizeof(*m));
-    m->used = true; m->mine = mine;
+    m->used = true; m->mine = mine; m->prio = prio;
     m->from = from; m->to = to; m->mid = mid; m->ts = ts;
     m->next = now + RETRY_S[0] * 1000UL;
     strncpy(m->name, name, BN_NAME_MAX);
@@ -188,6 +188,76 @@ class Mailbox {
  private:
   Mail m_[N] = {};
   size_t rr_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Shared mesh clock. The nodes have no real-time clock, so they learn the time from the
+// phones and laptops that talk to them (and from each other's beacons). Every source gets one
+// vote (its newest reading), the median wins, and a single wrong device is outvoted.
+// ---------------------------------------------------------------------------
+class MeshClock {
+ public:
+  static constexpr uint32_t SAMPLE_TTL_MS = 30UL * 60UL * 1000UL;   // a reading is trusted this long
+
+  // unixSec: the source's idea of the current Unix time. source: who said it (user or node id).
+  void feed(uint32_t source, uint32_t unixSec, uint32_t nowMs) {
+    if (unixSec < MIN_PLAUSIBLE) return;                 // unset device clock (1970, 2000, ...)
+    S* e = nullptr;
+    for (auto& x : s_) if (x.used && x.src == source) { e = &x; break; }
+    if (!e) for (auto& x : s_) if (!x.used || nowMs - x.ms > SAMPLE_TTL_MS) { e = &x; break; }
+    if (!e) {                                             // table full: replace the oldest
+      e = &s_[0];
+      for (auto& x : s_) if (nowMs - x.ms > nowMs - e->ms) e = &x;
+    }
+    e->used = true; e->src = source; e->unix = unixSec; e->ms = nowMs;
+    recompute(nowMs);
+  }
+  bool known() const { return known_; }
+  uint32_t now(uint32_t nowMs) const { return known_ ? base_ + (nowMs - baseMs_) / 1000 : 0; }
+  // keep the millisecond counter from wrapping (call now and then, e.g. hourly)
+  void rebase(uint32_t nowMs) { if (known_) { base_ = now(nowMs); baseMs_ = nowMs; } }
+  // the timestamp to put on a message: the sender's own if it is plausible, else the mesh time
+  uint32_t stamp(uint32_t clientTs, uint32_t nowMs) const {
+    if (!known_) return clientTs;
+    uint32_t n = now(nowMs);
+    int64_t d = (int64_t)clientTs - (int64_t)n;
+    if (clientTs == 0 || d > 300 || d < -300) return n;
+    return clientTs;
+  }
+
+ private:
+  static constexpr uint32_t MIN_PLAUSIBLE = 1700000000UL;  // late 2023, anything earlier is a reset clock
+  struct S { bool used; uint32_t src, unix, ms; };
+  S s_[8] = {};
+  bool known_ = false;
+  uint32_t base_ = 0, baseMs_ = 0, baseSrc_ = 0;
+
+  void setTo(uint32_t unixSec, uint32_t nowMs, uint32_t src) { known_ = true; base_ = unixSec; baseMs_ = nowMs; baseSrc_ = src; }
+
+  void recompute(uint32_t nowMs) {
+    uint32_t v[8], src[8]; size_t n = 0;
+    for (auto& x : s_) {
+      if (!x.used) continue;
+      uint32_t age = nowMs - x.ms;
+      if (age > SAMPLE_TTL_MS) { x.used = false; continue; }
+      v[n] = x.unix + age / 1000; src[n] = x.src; n++;
+    }
+    if (n == 0) return;
+    for (size_t i = 1; i < n; i++)                        // insertion sort, keeping sources aligned
+      for (size_t j = i; j > 0 && v[j] < v[j - 1]; j--) {
+        uint32_t t = v[j]; v[j] = v[j - 1]; v[j - 1] = t;
+        t = src[j]; src[j] = src[j - 1]; src[j - 1] = t;
+      }
+    size_t mi = n / 2;
+    uint32_t med = v[mi];
+    if (!known_) { setTo(med, nowMs, src[mi]); return; }
+    uint32_t cur = now(nowMs);
+    uint32_t diff = med > cur ? med - cur : cur - med;
+    if (diff < 2) return;                                 // already right
+    size_t agree = 0;
+    for (size_t i = 0; i < n; i++) { uint32_t d = v[i] > med ? v[i] - med : med - v[i]; if (d <= 60) agree++; }
+    if (agree >= 2 || (n == 1 && src[0] == baseSrc_)) setTo(med, nowMs, src[mi]);
+  }
 };
 
 // ---------------------------------------------------------------------------

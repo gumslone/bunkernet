@@ -10,7 +10,14 @@ const src = fs.readFileSync(path.join(__dirname, '../../firmware/bunkernet/web_u
 const html = src.match(/R"HTML\(([\s\S]*?)\)HTML"/)[1];
 
 const ANNA = '0000a001', MARK = '0000b002', MAYA = '0000c003', SAM = '0000e005'; // Sam is offline
-const state = { alert: false };
+const state = { alert: false, skew: 0 };   // skew: minutes the mesh clock differs from the browser
+
+const roomHash = (n) => {                     // same as the web page: FNV-1a over the UTF-8 name
+  let h = 0x811c9dc5;
+  for (const b of Buffer.from(n.trim().toLowerCase(), 'utf8')) { h ^= b; h = Math.imul(h, 0x01000193); }
+  return ('0000000' + (h >>> 0).toString(16)).slice(-8);
+};
+const WATCH = roomHash('watch');
 
 // f === 'me' is replaced by the requesting client's id
 const msgs = [
@@ -23,6 +30,9 @@ const msgs = [
   { i: 7, t: 2, f: 'me', to: MARK, m: '00000007', n: 'Olek', x: 'On my way', ago: 900 },
   { i: 8, t: 2, f: 'me', to: MARK, m: '00000008', n: 'Olek', x: 'Fuel is at 70%, enough for 2 days', ago: 600 },
   { i: 9, t: 2, f: ANNA, to: 'me', m: '00000009', n: 'Anna', x: 'Are you bringing the fuses?', ago: 300 },
+  { i: 12, t: 1, f: MARK, to: '00000000', m: '0000000c', n: 'Mark', x: 'Generator is overheating, someone check it now', p: 1, ago: 400 },
+  { i: 13, t: 8, f: MAYA, to: WATCH, m: '0000000d', n: 'Maya', x: 'North door checked, all quiet', ago: 700 },
+  { i: 14, t: 8, f: 'me', to: WATCH, m: '0000000e', n: 'Olek', x: 'Thanks, I take the next round at 22:00', ago: 500 },
   { i: 11, t: 2, f: 'me', to: SAM, m: '0000000b', n: 'Olek', x: 'Filter instructions are taped to the fridge', ago: 240 },
   { i: 10, t: 5, f: MARK, to: 'me', m: '00000007', n: '', x: '', ago: 590 },
 ];
@@ -35,13 +45,13 @@ const data = [
   { k: 'air_filter_B', v: 'check', f: MARK, ago: 5400 },
 ];
 const nodes = {
-  id: 'A1B2', up: 86412, heap: 21840, clients: 3,
+  id: 'A1B2', up: 86412, heap: 21840, clients: 3, mt: Math.floor(Date.now() / 1000),
   nodes: [
-    { id: 'A1B2', n: 'Node-A1B2', h: 0, a: 0 },
-    { id: '77C4', n: 'Node-77C4', h: 1, a: 3 },
-    { id: 'E019', n: 'Node-E019', h: 1, a: 6 },
-    { id: '5D3F', n: 'Node-5D3F', h: 2, a: 8 },
-    { id: '0B88', n: 'Node-0B88', h: 3, a: 2 },
+    { id: 'A1B2', n: 'Node-A1B2', h: 0, a: 0, v: 3290 },
+    { id: '77C4', n: 'Node-77C4', h: 1, a: 3, v: 3270 },
+    { id: 'E019', n: 'Node-E019', h: 1, a: 6, v: 2940 },
+    { id: '5D3F', n: 'Node-5D3F', h: 2, a: 8, v: 3310 },
+    { id: '0B88', n: 'Node-0B88', h: 3, a: 2, v: 0 },
   ],
 };
 
@@ -50,7 +60,7 @@ function poll(q) {
   const now = Math.floor(Date.now() / 1000);
   const fix = (v) => (v === 'me' ? me : v);
   const out = {
-    node: 'A1B2', last: msgs.length,
+    node: 'A1B2', last: 14, mt: now - state.skew * 60,
     msgs: msgs.filter((m) => m.i > since).map((m) => ({ ...m, s: now - m.ago, f: fix(m.f), to: fix(m.to) })),
     users: [...users, { id: me, n: q.get('name') || 'me' }],
     dv: 1, av: state.alert ? 2 : 1,
@@ -68,6 +78,9 @@ http.createServer((req, res) => {
   if (u.pathname === '/') { res.setHeader('Content-Type', 'text/html'); return res.end(html); }
   if (u.pathname === '/poll') return json(poll(u.searchParams));
   if (u.pathname === '/nodes') return json(nodes);
+  if (u.pathname === '/__skew') { state.skew = Number(u.searchParams.get('m') || 0); return res.end('ok'); }
+  if (u.pathname === '/nodes') { return json({ ...nodes, mt: Math.floor(Date.now() / 1000) }); }
+  if (u.pathname === '/__room') return json({ watch: WATCH });
   if (u.pathname === '/__alert') { state.alert = u.searchParams.get('on') === '1'; return res.end('ok'); }
   res.end('ok');
 }).listen(port, '127.0.0.1', () => console.log(`mock BunkerNet node on http://127.0.0.1:${port}`));

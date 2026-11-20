@@ -24,6 +24,12 @@ extern "C" {
 #define RELAY_ONLY 0
 #endif
 
+#if !RELAY_ONLY && defined(OTA_PASSWORD)
+#include <ESP8266HTTPUpdateServer.h>
+#endif
+
+ADC_MODE(ADC_VCC);   // lets ESP.getVcc() report the supply voltage (A0 is not used)
+
 // ---------------------------------------------------------------- constants
 #define MAGIC        0xA7
 #define OFF_TTL      1
@@ -37,7 +43,8 @@ extern "C" {
 #define NAME_MAX_LEN BN_NAME_MAX
 #define TEXT_MAX_LEN BN_TEXT_MAX
 
-enum : uint8_t { T_CHAT = 1, T_DM = 2, T_PRESENCE = 3, T_BEACON = 4, T_ACK = 5, T_DATA = 6, T_ALERT = 7 };
+enum : uint8_t { T_CHAT = 1, T_DM = 2, T_PRESENCE = 3, T_BEACON = 4, T_ACK = 5, T_DATA = 6, T_ALERT = 7, T_ROOM = 8 };
+#define F_PRIO 0x80   // flag bit on the message type: priority message
 
 #define RXQ_N   8
 #define TXQ_N   16
@@ -77,13 +84,14 @@ static uint32_t lastTx = 0;
 static bn::ReplayTable<REPLAY_N> replay;
 static bn::AuthTable<AUTH_N> authTab;
 static bn::Mailbox<MAIL_N> mailbox;
+static bn::MeshClock meshClock;
 static bool stateDirty = false;
 static uint32_t lastSave = 0;
 using bn::Mail;
 
 // message log shown to local clients
 struct LogEnt {
-  uint32_t lid; uint8_t type; bool acked;
+  uint32_t lid; uint8_t type; bool acked, prio;
   uint32_t from, to, mid, ts;
   char name[NAME_MAX_LEN + 1];
   char text[TEXT_MAX_LEN + 1];
@@ -97,7 +105,7 @@ struct User {
 };
 static User users[USERS_N];
 
-struct NodeEnt { uint32_t id; uint32_t seen; uint8_t hops; char name[NAME_MAX_LEN + 1]; };
+struct NodeEnt { uint32_t id; uint32_t seen; uint16_t vcc; uint8_t hops; char name[NAME_MAX_LEN + 1]; };
 static NodeEnt nodes[NODES_N];
 
 struct DataEnt { bool used; uint32_t from, ts; char k[NAME_MAX_LEN + 1]; char v[48]; };
@@ -112,7 +120,11 @@ static uint32_t alertVer = 1;
 struct AlertRep { bool active; uint8_t left; uint32_t next, mid, from; char name[NAME_MAX_LEN + 1]; char text[TEXT_MAX_LEN + 1]; };
 static AlertRep rep;
 
-static uint32_t tBeacon = 0, tPresence = 0;
+static uint32_t tBeacon = 0, tPresence = 0, tRebase = 0;
+
+#if !RELAY_ONLY && defined(OTA_PASSWORD)
+static ESP8266HTTPUpdateServer httpUpdater;
+#endif
 
 #define MLOG(...) do { if (DEBUG_SERIAL) Serial.printf(__VA_ARGS__); } while (0)
 
@@ -120,6 +132,8 @@ static uint32_t tBeacon = 0, tPresence = 0;
 static void put32(uint8_t* p, uint32_t v) { memcpy(p, &v, 4); }
 static uint32_t get32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static uint32_t rnd32() { return RANDOM_REG32; }
+// supply voltage of the module in millivolts (the SDK reports 1/1024 V)
+static uint16_t vccMv() { return (uint16_t)((uint32_t)ESP.getVcc() * 1000UL / 1024UL); }
 
 static uint32_t fnv(const uint8_t* p, size_t n) {
   uint32_t h = 2166136261UL;
@@ -176,12 +190,13 @@ static void noteDuplicate(uint32_t key) {
 
 // ---------------------------------------------------------------- mesh send
 static uint32_t meshSend(uint8_t type, uint32_t from, uint32_t to, uint32_t mid,
-                         const char* name, const char* text, uint32_t ts = 0, uint8_t ttl = MESH_TTL) {
+                         const char* name, const char* text, uint32_t ts = 0, uint8_t ttl = MESH_TTL,
+                         bool prio = false) {
   uint8_t pt[PT_MAX];
   size_t nl = strlen(name); if (nl > NAME_MAX_LEN) nl = NAME_MAX_LEN;
   size_t tl = strlen(text); if (tl > TEXT_MAX_LEN) tl = TEXT_MAX_LEN;
   if (mid == 0) mid = rnd32() | 1;
-  pt[0] = type; pt[1] = ttl;
+  pt[0] = type | (prio ? F_PRIO : 0); pt[1] = ttl;
   put32(pt + 2, from); put32(pt + 6, to); put32(pt + 10, mid); put32(pt + 14, ts);
   pt[18] = (uint8_t)nl;
   memcpy(pt + PT_HDR, name, nl);
@@ -233,7 +248,7 @@ static bool userIsLocal(uint32_t id) {
   return u && u->node == myId && millis() - u->seen < 120000UL;
 }
 
-static void touchNode(uint32_t id, const char* name, uint8_t hops) {
+static void touchNode(uint32_t id, const char* name, uint8_t hops, uint16_t vcc) {
   uint32_t now = millis();
   NodeEnt* e = nullptr;
   for (auto& n : nodes) if (n.id == id) { e = &n; break; }
@@ -246,7 +261,7 @@ static void touchNode(uint32_t id, const char* name, uint8_t hops) {
     memset(e, 0, sizeof(*e)); e->id = id;
   }
   copyUtf8(e->name, name, strlen(name), NAME_MAX_LEN);
-  e->hops = hops; e->seen = now;
+  e->hops = hops; e->seen = now; e->vcc = vcc;
 }
 
 static void setData(uint32_t from, const char* k, const char* v, uint32_t ts) {
@@ -261,10 +276,10 @@ static void setData(uint32_t from, const char* k, const char* v, uint32_t ts) {
 }
 
 static LogEnt* addLog(uint8_t type, uint32_t from, uint32_t to, uint32_t mid,
-                      const char* name, const char* text, uint32_t ts = 0) {
+                      const char* name, const char* text, uint32_t ts = 0, bool prio = false) {
   LogEnt& e = logRing[logCount % LOG_N];
   logCount++;
-  e.lid = logCount; e.type = type; e.acked = false;
+  e.lid = logCount; e.type = type; e.acked = false; e.prio = prio;
   e.from = from; e.to = to; e.mid = mid; e.ts = ts;
   strncpy(e.name, name, NAME_MAX_LEN); e.name[NAME_MAX_LEN] = 0;
   strncpy(e.text, text, TEXT_MAX_LEN); e.text[TEXT_MAX_LEN] = 0;
@@ -278,9 +293,9 @@ static void markDelivered(uint32_t mid) {
 }
 
 static Mail* storeMail(uint32_t from, uint32_t to, uint32_t mid, uint32_t ts,
-                       const char* name, const char* text, bool mine) {
+                       const char* name, const char* text, bool mine, bool prio = false) {
   stateDirty = true;
-  return mailbox.store(from, to, mid, ts, name, text, mine, millis());
+  return mailbox.store(from, to, mid, ts, name, text, mine, millis(), prio);
 }
 
 // alert with empty text = cancel of the alert with that mid
@@ -424,7 +439,8 @@ static void loadState() {
 // ---------------------------------------------------------------- rx handling
 static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origin) {
   if (n < PT_HDR) return;
-  uint8_t type = pt[0], ittl = pt[1];
+  uint8_t type = pt[0] & 0x7F, ittl = pt[1];
+  bool prio = (pt[0] & F_PRIO) != 0;
   uint32_t from = get32(pt + 2), to = get32(pt + 6), mid = get32(pt + 10), ts = get32(pt + 14);
   size_t nl = pt[18];
   if (PT_HDR + nl > n) return;
@@ -436,7 +452,8 @@ static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origi
 
   switch (type) {
     case T_CHAT:
-      addLog(type, from, to, mid, name, text, ts);
+    case T_ROOM:
+      addLog(type, from, to, mid, name, text, ts, prio);
       break;
     case T_DM: {
       Mail* mm = findMail(mid);
@@ -447,8 +464,8 @@ static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origi
         }
         break;
       }
-      storeMail(from, to, mid, ts, name, text, false);
-      addLog(T_DM, from, to, mid, name, text, ts);
+      storeMail(from, to, mid, ts, name, text, false, prio);
+      addLog(T_DM, from, to, mid, name, text, ts, prio);
       break;
     }
     case T_PRESENCE: {
@@ -461,9 +478,15 @@ static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origi
       touchUser(from, name, origin);
       break;
     }
-    case T_BEACON:
-      touchNode(from, name, hops);
+    case T_BEACON: {
+      // beacon text is "<unix time or 0>;<supply mV>"
+      char* semi = nullptr;
+      uint32_t t = (uint32_t)strtoul(text, &semi, 10);
+      uint16_t v = (semi && *semi == ';') ? (uint16_t)strtoul(semi + 1, nullptr, 10) : 0;
+      if (t) meshClock.feed(from, t, millis());
+      touchNode(from, name, hops, v);
       break;
+    }
     case T_ACK:
       markDelivered(mid);
       if (userIsLocal(to)) addLog(T_ACK, from, to, mid, "", "");
@@ -501,7 +524,7 @@ static void processRx() {
             uint8_t ttl = d[OFF_TTL];
             if (ttl > 1) {                              // relay with random delay
               d[OFF_TTL] = ttl - 1;
-              bool damp = buf[0] == T_BEACON || buf[0] == T_PRESENCE;
+              bool damp = (buf[0] & 0x7F) == T_BEACON || (buf[0] & 0x7F) == T_PRESENCE;
               txEnqueue(d, len, now + 10 + rnd32() % 70, key, damp);
             }
             handlePlain(buf, n, ttl, origin);
@@ -562,6 +585,7 @@ static bool authClient(uint32_t me) {
   bn::AuthTable<AUTH_N>::Result r = authTab.check(me, h);
   if (r == bn::AuthTable<AUTH_N>::BAD) { server.send(403, "text/plain", "auth"); return false; }
   if (r == bn::AuthTable<AUTH_N>::NEW) { authTab.learn(me, h); stateDirty = true; }
+  if (server.hasArg("ts")) meshClock.feed(me, (uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10), millis());
   String nm = server.arg("name");
   User* u = touchUser(me, nm.c_str(), myId);
   if (r == bn::AuthTable<AUTH_N>::NEW) u->needPresence = true;
@@ -593,13 +617,14 @@ static void handlePoll() {
   String o; o.reserve(1100);
   char h[9];
   o += "{\"node\":\""; hex8(h, myId); o += (h + 4); o += "\",\"last\":"; o += logCount;
+  o += ",\"mt\":"; o += meshClock.now(millis());
   o += ",\"msgs\":[";
   uint32_t first = logCount > LOG_N ? logCount - LOG_N + 1 : 1;
   if (since + 1 > first) first = since + 1;
   bool comma = false;
   for (uint32_t lid = first; lid <= logCount; lid++) {
     LogEnt& e = logRing[(lid - 1) % LOG_N];
-    bool vis = e.type == T_CHAT || (e.type == T_DM && (e.from == me || e.to == me)) ||
+    bool vis = e.type == T_CHAT || e.type == T_ROOM || (e.type == T_DM && (e.from == me || e.to == me)) ||
                (e.type == T_ACK && e.to == me);
     if (!vis) continue;
     if (comma) o += ',';
@@ -609,6 +634,7 @@ static void handlePoll() {
     hex8(h, e.to);   o += "\",\"to\":\""; o += h;
     hex8(h, e.mid);  o += "\",\"m\":\""; o += h;
     o += "\",\"s\":"; o += e.ts;
+    if (e.prio) o += ",\"p\":1";
     o += ",\"n\":"; jesc(o, e.name);
     o += ",\"x\":"; jesc(o, e.text);
     o += '}';
@@ -627,6 +653,7 @@ static void handlePoll() {
     hex8(h, mm.to);   o += "\",\"to\":\""; o += h;
     hex8(h, mm.mid);  o += "\",\"m\":\""; o += h;
     o += "\",\"s\":"; o += mm.ts;
+    if (mm.prio) o += ",\"p\":1";
     o += ",\"n\":"; jesc(o, mm.name);
     o += ",\"x\":"; jesc(o, mm.text);
     o += '}';
@@ -686,11 +713,14 @@ static void handleSend() {
   copyUtf8(name, nm.c_str(), nm.length(), NAME_MAX_LEN);
   copyUtf8(text, x.c_str(), x.length(), TEXT_MAX_LEN);
   if (!text[0]) { server.send(400, "text/plain", "empty"); return; }
-  uint8_t type = to ? T_DM : T_CHAT;
-  uint32_t ts = (uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10);
-  uint32_t mid = meshSend(type, me, to, 0, name, text, ts);
-  addLog(type, me, to, mid, name, text, ts);
-  if (type == T_DM) storeMail(me, to, mid, ts, name, text, true);
+  uint32_t room = argHex("room");
+  uint8_t type = room ? T_ROOM : (to ? T_DM : T_CHAT);
+  if (room) to = room;
+  bool prio = server.arg("p") == "1";
+  uint32_t ts = meshClock.stamp((uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10), millis());
+  uint32_t mid = meshSend(type, me, to, 0, name, text, ts, MESH_TTL, prio);
+  addLog(type, me, to, mid, name, text, ts, prio);
+  if (type == T_DM) storeMail(me, to, mid, ts, name, text, true, prio);
   server.send(200, "text/plain", "ok");
 }
 
@@ -704,7 +734,7 @@ static void handlePut() {
   copyUtf8(key, k.c_str(), k.length(), NAME_MAX_LEN);
   copyUtf8(val, v.c_str(), v.length(), 47);
   if (!key[0]) { server.send(400, "text/plain", "bad"); return; }
-  uint32_t ts = (uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10);
+  uint32_t ts = meshClock.stamp((uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10), millis());
   setData(me, key, val, ts);
   meshSend(T_DATA, me, 0, 0, key, val, ts);
   server.send(200, "text/plain", "ok");
@@ -740,13 +770,15 @@ static void handleNodes() {
   o += ",\"heap\":"; o += ESP.getFreeHeap();
   o += ",\"clients\":"; o += WiFi.softAPgetStationNum();
   o += ",\"defkey\":"; o += usingDefaultKey ? 1 : 0;
-  o += ",\"nodes\":[{\"id\":\""; o += (h + 4); o += "\",\"n\":"; jesc(o, nodeName); o += ",\"h\":0,\"a\":0}";
+  o += ",\"mt\":"; o += meshClock.now(millis());
+  o += ",\"nodes\":[{\"id\":\""; o += (h + 4); o += "\",\"n\":"; jesc(o, nodeName); o += ",\"h\":0,\"a\":0,\"v\":"; o += vccMv(); o += "}";
   uint32_t now = millis();
   for (auto& n : nodes) {
     if (!n.id || now - n.seen > NODE_TTL_MS) continue;
     hex8(h, n.id);
     o += ",{\"id\":\""; o += (h + 4); o += "\",\"n\":"; jesc(o, n.name);
-    o += ",\"h\":"; o += n.hops; o += ",\"a\":"; o += (now - n.seen) / 1000; o += '}';
+    o += ",\"h\":"; o += n.hops; o += ",\"a\":"; o += (now - n.seen) / 1000;
+    o += ",\"v\":"; o += n.vcc; o += '}';
     flushJson(o);
   }
   o += "]}";
@@ -788,6 +820,9 @@ void setup() {
   deriveKey(MESH_PSK, meshKey);
   loadState();
 
+#if MESH_PHY_11B
+  wifi_set_phy_mode(PHY_MODE_11B);          // experimental: slower but more sensitive radio mode
+#endif
   WiFi.persistent(false);
   WiFi.setAutoConnect(false);
 #if RELAY_ONLY
@@ -802,6 +837,7 @@ void setup() {
   WiFi.disconnect();
 #endif
 
+  WiFi.setOutputPower(TX_POWER_DBM);
   if (esp_now_init() != 0) { MLOG("esp_now_init failed\n"); delay(1000); ESP.restart(); }
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
   esp_now_add_peer((uint8_t*)BCAST, ESP_NOW_ROLE_COMBO, MESH_CHANNEL, NULL, 0);
@@ -817,6 +853,9 @@ void setup() {
   server.on("/alert", handleAlert);
   server.on("/alertclear", handleAlertClear);
   server.onNotFound(handleNotFound);
+#if defined(OTA_PASSWORD)
+  httpUpdater.setup(&server, "/update", OTA_USER, OTA_PASSWORD);   // browser firmware upload, password protected
+#endif
   server.begin();
 #endif
 
@@ -835,7 +874,9 @@ void loop() {
 
   uint32_t now = millis();
   if ((int32_t)(now - tBeacon) >= 0) {
-    meshSend(T_BEACON, myId, 0, 0, nodeName, "", 0, BEACON_TTL);
+    char bt[24];
+    snprintf(bt, sizeof(bt), "%lu;%u", (unsigned long)meshClock.now(now), (unsigned)vccMv());
+    meshSend(T_BEACON, myId, 0, 0, nodeName, bt, 0, BEACON_TTL);
     tBeacon = now + BEACON_MS + rnd32() % 1000;
   }
   bool periodic = (int32_t)(now - tPresence) >= 0;
@@ -852,10 +893,11 @@ void loop() {
   }
   bn::Mail* due = mailbox.due(now);               // back-off retries of our own undelivered DMs
   if (due) {
-    meshSend(T_DM, due->from, due->to, due->mid, due->name, due->text, due->ts);
+    meshSend(T_DM, due->from, due->to, due->mid, due->name, due->text, due->ts, MESH_TTL, due->prio);
     mailbox.retried(due, now);                    // at most one per loop pass
   }
   if (stateDirty && now - lastSave > STATE_SAVE_MS) saveState();
+  if (now - tRebase > 3600000UL) { meshClock.rebase(now); tRebase = now; }
   if (rep.active && (int32_t)(now - rep.next) >= 0) {
     if (rep.left == 0) rep.active = false;
     else {
@@ -869,7 +911,7 @@ void loop() {
     if (!sosSince) sosSince = now ? now : 1;
     if (!sosFired && now - sosSince > 2000) {      // hold 2 s
       sosFired = true;
-      char t[TEXT_MAX_LEN + 1]; snprintf(t, sizeof(t), "SOS button pressed at %s", nodeName);
+      char t[TEXT_MAX_LEN + 1]; snprintf(t, sizeof(t), "%s %s", SOS_TEXT, nodeName);
       raiseAlert(myId, nodeName, t);
     }
   } else { sosSince = 0; sosFired = false; }

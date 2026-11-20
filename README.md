@@ -15,8 +15,17 @@ scenario, but it works equally well for a cabin, a festival or a blackout.
 
 - **Group chat and private messages**, with delivery ticks (✓ sent, ✓✓ delivered), plus
   **time stamps and date separators** on every message.
+- **Rooms:** tap *+ Room*, type a name such as `watch`, and everyone who joins a room with that
+  name shares it. A simple way to keep topics apart. Rooms are not secret, only separate.
+- **Priority messages:** tap ❗ before sending and the message is highlighted red and makes
+  receivers' phones beep and vibrate.
+- **English, German and Ukrainian** interface, chosen automatically from the phone's language
+  (change it from the name dialog).
 - **Your name:** the first time you open the page it asks for a name, saved in your browser.
   Tap your name at the top right to change it at any time.
+- **Shared clock:** the nodes have no clock of their own, so they agree on the time from the
+  phones talking to them (the majority wins, one wrong phone is outvoted). Messages from a
+  phone with a wrong clock are re-stamped with the mesh time, and that phone is told.
 - **Store-and-forward:** send a private message to someone who is offline and it is held by the
   mesh and delivered the moment they next open the page, on any node, even hours later.
   The sender sees ⏳ *stored* until the delivery receipt (✓✓) arrives.
@@ -25,7 +34,8 @@ scenario, but it works equally well for a cabin, a festival or a blackout.
   button** (hold 2 s).
 - **Shared data board:** small key/value entries such as `water_level = 40%`, readable and
   writable from the web page or through the HTTP API (for sensors and scripts).
-- **Node map:** which nodes are alive and how many hops away, to help you place them.
+- **Node map:** which nodes are alive, how many hops away, and their supply voltage, to help
+  you place them and spot a flat battery early.
 - **Encrypted mesh:** every packet is ChaCha20-Poly1305 encrypted and authenticated with a
   pre-shared key (stretched with PBKDF2). Replayed and duplicate packets are rejected.
 - **Private means private:** each person's id is protected by a secret token kept in their
@@ -47,6 +57,10 @@ The web app is served by every node and works in any phone or laptop browser.
 | Group chat | Private chat | Stored for offline user |
 |:--:|:--:|:--:|
 | <img src="docs/screenshots/chat.png" width="200"> | <img src="docs/screenshots/private.png" width="200"> | <img src="docs/screenshots/offline.png" width="200"> |
+
+| Topic room | German interface, with a priority message and a clock hint |
+|:--:|:--:|
+| <img src="docs/screenshots/rooms.png" width="200"> | <img src="docs/screenshots/chat-de.png" width="200"> |
 
 | Emergency alert | Data board | Node map |
 |:--:|:--:|:--:|
@@ -165,6 +179,10 @@ of them in the git-ignored `config.local.h` (`tools/new-psk.sh` creates it):
 | `BEACON_TTL` | `4` | Max hops for node announcements (the Nodes tab only lists nodes this close) |
 | `MAX_CLIENTS` | `6` | Devices per node |
 | `SOS_PIN` | `-1` (off) | GPIO for a push button to GND (ESP-01: GPIO2) |
+| `SOS_TEXT` | `SOS button pressed at` | Text of the SOS alert (the node name is added), e.g. in German |
+| `TX_POWER_DBM` | `20.5` | Radio power, 0 to 20.5 dBm (lower it to save power) |
+| `MESH_PHY_11B` | `0` | Experimental: `1` switches to the slower, more sensitive 802.11b mode. Test it first, see below |
+| `OTA_PASSWORD` | not set | Set it to enable browser firmware upload at `/update` (user `OTA_USER`, default `admin`). Needs 2 MB+ flash |
 | `LED_PIN` | `-1` (off) | Activity LED (ESP-01S: GPIO2, active low) |
 
 ## Placement tips
@@ -175,12 +193,26 @@ of them in the git-ignored `config.local.h` (`tools/new-psk.sh` creates it):
   hops away.
 - One node serves about 6 devices, so add nodes where people gather.
 
+### Range experiments and updates
+
+- **`MESH_PHY_11B`:** 802.11b is slower but more sensitive, so it can reach further. Whether it
+  helps ESP-NOW on your boards is not something I could confirm without hardware, so treat it as
+  an experiment: flash two nodes with it, repeat the range test in
+  [`docs/TESTING.md`](docs/TESTING.md) and keep it only if it wins. All nodes must use the same
+  setting. Phones need 802.11b support (most have it).
+- **Browser firmware upload:** define `OTA_PASSWORD` in `config.local.h` and each node accepts a
+  firmware `.bin` at `http://192.168.4.1/update` (HTTP basic auth). It works on boards with 2 MB+
+  flash (NodeMCU, Wemos D1). A 1 MB ESP-01 doesn't have room for an over-the-air update, so keep
+  using the serial adapter there. Updates are per node, because updating the whole mesh at once
+  would let one bad file brick every node. Anyone who knows the password on the open
+  Wi-Fi link can see it, so also set `AP_PASSWORD`.
+
 ## Printable join sheet
 
 Put a sheet next to the nodes so anyone can join without help: a Wi-Fi QR code, a QR code that
 opens the app, three steps and a short guide to the buttons, with spaces to write down where
 the nodes are and who to ask. Ready-made one-page A4 PDFs for the default network (no password):
-[English](docs/join-sheet-en.pdf) and [Ukrainian](docs/join-sheet-uk.pdf).
+[English](docs/join-sheet-en.pdf), [German](docs/join-sheet-de.pdf) and [Ukrainian](docs/join-sheet-uk.pdf).
 
 Make one for your own network name and password (needs Node 18+, and Chrome for the PDF):
 
@@ -220,11 +252,14 @@ must include both `me` and `tok`. The first request claims the id, later ones mu
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /send` | `me`, `tok`, `name`, `to` (`0` = everyone), `x` (text), `ts` (optional unix seconds) |
+| `POST /send` | `me`, `tok`, `name`, `to` (`0` = everyone) or `room` (8 hex digits, see below), `x` (text), `p=1` (priority), `ts` (optional unix seconds) |
 | `POST /put` | `me`, `tok`, `name`, `k`, `v`, `ts` (optional): set a data-board entry |
 | `POST /alert`, `POST /alertclear` | `me`, `tok`, `name`, `x` / `me`, `tok`, `m` |
-| `GET /poll` | `me`, `tok`, `name`, `since`, `dv`, `av`: new messages, users, data, alerts |
+| `GET /poll` | `me`, `tok`, `name`, `since`, `dv`, `av`, `ts`: new messages, users, data, alerts, mesh time (`mt`) |
 | `GET /nodes` | Known nodes, hops and node stats |
+
+A room id is the 32-bit FNV-1a hash (as 8 lowercase hex digits) of the lower-cased, trimmed UTF-8
+room name.
 
 Example: publish a sensor value from a script.
 
@@ -240,7 +275,9 @@ The payload holds the message type, original TTL, sender, recipient, message id,
 Presence packets also carry the sender's identity claim (a hash of their token). The boot
 counter is saved in flash and grows on every reboot, so a recorded packet from an earlier boot
 is rejected as a replay. The mesh key is `PBKDF2-HMAC-SHA256(MESH_PSK, 4096 rounds)`.
-Types: chat, DM, presence, beacon, ACK, data, alert. See
+Types: chat, DM, presence, beacon, ACK, data, alert, room. Bit `0x80` on the type marks a priority
+message. A room message carries the room hash in its recipient field. Beacons carry the node's
+time and supply voltage as text (`<unix time>;<millivolts>`). See
 [`bunkernet.ino`](firmware/bunkernet/bunkernet.ino).
 
 ## Limits
@@ -256,6 +293,13 @@ Types: chat, DM, presence, beacon, ACK, data, alert. See
 - Identities are claimed on first use. If an attacker reaches a node and claims someone's id
   before that person's own claim has spread, the real owner is locked out on that node and the
   page quietly gives them a new identity. It is an unlikely race, but not impossible.
+- With only one or two devices on the mesh there is no majority for the shared clock: the first
+  time the nodes hear wins until more phones or nodes join and outvote it.
+- The supply voltage is what the module sees on its own supply pin. On a regulated 3.3 V
+  supply it stays near 3.3 V until the regulator drops out, so it warns about a flat battery only
+  when the module runs straight off the battery. It is accurate to roughly 0.1 V.
+- Rooms are topics, not secrets: every node keeps room messages and any client that knows the
+  name can read it.
 - Chat history is kept in RAM, about the last 28 messages per node. Stored private messages (12
   per node) are saved to flash and survive power cuts. They are lost if every holder is
   wiped, or if more than 12 are waiting, the oldest go first.
@@ -265,7 +309,8 @@ Types: chat, DM, presence, beacon, ACK, data, alert. See
 ## Development
 
 CI (GitHub Actions) builds every PlatformIO environment on each push and pull request,
-syntax-checks the embedded web UI script and runs the native tests. Pushing a tag like `v0.1.0` builds all targets and
+syntax-checks the embedded web UI script, runs the native tests and runs `cppcheck` on the
+hardware-independent logic. Pushing a tag like `v0.1.0` builds all targets and
 publishes a GitHub release with the firmware binaries and checksums. Release binaries use the
 public default key, so they are for testing only.
 

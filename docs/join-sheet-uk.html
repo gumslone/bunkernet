@@ -3,12 +3,12 @@
 <style>
 @page { size: A4; margin: 11mm; }
 * { box-sizing: border-box; }
-body { margin: 0; font: 11.5pt/1.3 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #111; }
+body { margin: 0; font: 10.6pt/1.28 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #111; }
 header { border-bottom: 3px solid #111; padding-bottom: 6px; margin-bottom: 10px; }
-h1 { margin: 0; font-size: 30pt; letter-spacing: .5px; }
+h1 { margin: 0; font-size: 28pt; letter-spacing: .5px; }
 header p { margin: 2px 0 0; font-size: 12.5pt; color: #333; }
-.top { display: grid; grid-template-columns: 1fr 50mm; gap: 12px; }
-.step { display: flex; gap: 10px; margin-bottom: 9px; }
+.top { display: grid; grid-template-columns: 1fr 46mm; gap: 12px; }
+.step { display: flex; gap: 10px; margin-bottom: 6px; }
 .num { flex: none; width: 28px; height: 28px; border-radius: 50%; background: #111; color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 14pt; margin-top: 2px; }
 .step h2 { margin: 0; font-size: 14pt; } .step p { margin: 1px 0 0; }
 code, .tag { font-family: ui-monospace, Menlo, monospace; background: #eee; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
@@ -16,10 +16,10 @@ code, .tag { font-family: ui-monospace, Menlo, monospace; background: #eee; padd
 .qr { border: 2px solid #111; border-radius: 10px; padding: 6px; text-align: center; }
 .qr svg { width: 100%; height: auto; display: block; }
 .qr b { display: block; font-size: 10.5pt; line-height: 1.2; }
-h3 { margin: 9px 0 4px; font-size: 14pt; border-bottom: 1px solid #999; padding-bottom: 2px; }
+h3 { margin: 7px 0 3px; font-size: 13pt; border-bottom: 1px solid #999; padding-bottom: 2px; }
 table { border-collapse: collapse; width: 100%; }
-td { padding: 3px 6px; vertical-align: top; border-bottom: 1px solid #ddd; }
-td:first-child { width: 31mm; font-weight: 700; white-space: nowrap; }
+td { padding: 2px 6px; vertical-align: top; border-bottom: 1px solid #ddd; }
+td:first-child { width: 29mm; font-weight: 700; white-space: nowrap; }
 ul { margin: 4px 0 0 18px; padding: 0; } li { margin: 2px 0; }
 .fill { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 8px; }
 .fill div { border-bottom: 1.5px solid #111; padding-top: 16px; font-size: 10.5pt; color: #333; }
@@ -39,8 +39,8 @@ ul { margin: 4px 0 0 18px; padding: 0; } li { margin: 2px 0; }
  </div>
 </div>
 <h3>Як користуватися</h3>
-<table><tr><td>Вкладка Chat</td><td>«Everyone» це спільний чат. Торкніться імені людини, щоб написати їй приватно.</td></tr><tr><td>✓ ✓✓ ⏳</td><td>✓ надіслано. ✓✓ доставлено. ⏳ збережено: дійде, щойно ця людина з'явиться в мережі.</td></tr><tr><td>Кнопка 🚨</td><td>Вмикає гучний червоний сигнал на всіх пристроях. Лише у разі справжньої небезпеки. Скасувати може будь-хто.</td></tr><tr><td>Вкладка Data</td><td>Спільні нотатки й значення для всіх, наприклад рівень води чи палива.</td></tr><tr><td>Вкладка Nodes</td><td>Показує, які вузли зв'язку працюють і як далеко вони.</td></tr></table>
+<table><tr><td>Вкладка Chat</td><td>«Everyone» це спільний чат. Торкніться імені людини, щоб написати їй приватно. «+ Кімната» додає тематичну кімнату, наприклад «чергування».</td></tr><tr><td>✓ ✓✓ ⏳</td><td>✓ надіслано. ✓✓ доставлено. ⏳ збережено: дійде, щойно ця людина з'явиться в мережі.</td></tr><tr><td>Кнопка 🚨</td><td>Вмикає гучний червоний сигнал на всіх пристроях. Лише у разі справжньої небезпеки. Скасувати може будь-хто.</td></tr><tr><td>Кнопка ❗</td><td>Позначає наступне повідомлення як важливе: червоне виділення, звук і вібрація в отримувача.</td></tr><tr><td>Вкладка Data</td><td>Спільні нотатки й значення для всіх, наприклад рівень води чи палива.</td></tr><tr><td>Вкладка Nodes</td><td>Показує, які вузли зв'язку працюють і як далеко вони.</td></tr></table>
 <h3>Варто знати</h3>
-<ul><li>Інтернету немає. Ваші повідомлення бачать лише люди в цій мережі.</li><li>Повідомлення короткі, до приблизно 176 літер.</li><li>Час береться з годинника на телефоні кожного.</li><li>Вузли зв'язку зберігають повідомлення для тих, кого немає в мережі, поки є живлення.</li></ul>
+<ul><li>Інтернету немає. Ваші повідомлення бачать лише люди в цій мережі.</li><li>Повідомлення короткі, до приблизно 176 літер.</li><li>Вузли синхронізують час. Якщо годинник вашого телефона сильно відстає, застосунок підкаже.</li><li>Вузли зв'язку зберігають повідомлення для тих, кого немає в мережі, поки є живлення.</li></ul>
 <div class="fill"><div>Вузли зв'язку розташовані</div><div>Пароль Wi-Fi</div><div>Відповідальна особа</div></div>
 </body></html>

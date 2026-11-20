@@ -13,7 +13,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((a, x, i, all) => (
 const SSID = args.ssid || 'BunkerNet';
 const PASSWORD = args.password || '';
 const OUT = path.resolve(args.out || path.join(__dirname, '../../docs'));
-const LANGS = args.lang && args.lang !== 'all' ? [args.lang] : ['en', 'uk'];
+const LANGS = args.lang && args.lang !== 'all' ? [args.lang] : ['en', 'uk', 'de'];
 const URL = 'http://192.168.4.1';
 const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
@@ -32,14 +32,15 @@ const T = {
     s3: 'Choose a name', s3t: 'Type a name when asked. Tap your name at the top right to change it later.',
     howTitle: 'How to use it',
     how: [
-      ['Chat tab', '"Everyone" is the group chat. Tap a person\'s name to send them a private message.'],
+      ['Chat tab', '"Everyone" is the group chat. Tap a person\'s name to write privately. "+ Room" joins a topic room such as "watch".'],
       ['✓ ✓✓ ⏳', '✓ sent. ✓✓ delivered. ⏳ stored: it is delivered the moment that person is back on the network.'],
       ['🚨 button', 'Raises a loud red alert on every device. Only for real emergencies. Anyone can clear it.'],
+      ['❗ button', 'Marks your next message as priority: highlighted red, with sound and vibration for the receiver.'],
       ['Data tab', 'Shared notes and values for everyone, such as water level or fuel.'],
       ['Nodes tab', 'Shows which relay boxes are working and how far away they are.'],
     ],
     goodTitle: 'Good to know',
-    good: ['There is no internet. Only people on this network can see your messages.', 'Messages are short text, up to about 176 letters.', 'Times come from each person\'s own phone clock.', 'Relay boxes keep messages for offline people while they have power.'],
+    good: ['There is no internet. Only people on this network can see your messages.', 'Messages are short text, up to about 176 letters.', 'The nodes share the time. If your phone\'s clock is far off, the app tells you.', 'Relay boxes keep messages for offline people while they have power.'],
     fill: ['Relay boxes are at', 'Wi-Fi password', 'Contact person'],
     scan1: 'Scan to join Wi-Fi', scan2: 'Scan to open the app',
   },
@@ -53,16 +54,39 @@ const T = {
     s3: 'Виберіть ім\'я', s3t: 'Введіть ім\'я, коли з\'явиться запит. Щоб змінити його згодом, торкніться свого імені вгорі праворуч.',
     howTitle: 'Як користуватися',
     how: [
-      ['Вкладка Chat', '«Everyone» це спільний чат. Торкніться імені людини, щоб написати їй приватно.'],
+      ['Вкладка Chat', '«Everyone» це спільний чат. Торкніться імені людини, щоб написати їй приватно. «+ Кімната» додає тематичну кімнату, наприклад «чергування».'],
       ['✓ ✓✓ ⏳', '✓ надіслано. ✓✓ доставлено. ⏳ збережено: дійде, щойно ця людина з\'явиться в мережі.'],
       ['Кнопка 🚨', 'Вмикає гучний червоний сигнал на всіх пристроях. Лише у разі справжньої небезпеки. Скасувати може будь-хто.'],
+      ['Кнопка ❗', 'Позначає наступне повідомлення як важливе: червоне виділення, звук і вібрація в отримувача.'],
       ['Вкладка Data', 'Спільні нотатки й значення для всіх, наприклад рівень води чи палива.'],
       ['Вкладка Nodes', 'Показує, які вузли зв\'язку працюють і як далеко вони.'],
     ],
     goodTitle: 'Варто знати',
-    good: ['Інтернету немає. Ваші повідомлення бачать лише люди в цій мережі.', 'Повідомлення короткі, до приблизно 176 літер.', 'Час береться з годинника на телефоні кожного.', 'Вузли зв\'язку зберігають повідомлення для тих, кого немає в мережі, поки є живлення.'],
+    good: ['Інтернету немає. Ваші повідомлення бачать лише люди в цій мережі.', 'Повідомлення короткі, до приблизно 176 літер.', 'Вузли синхронізують час. Якщо годинник вашого телефона сильно відстає, застосунок підкаже.', 'Вузли зв\'язку зберігають повідомлення для тих, кого немає в мережі, поки є живлення.'],
     fill: ['Вузли зв\'язку розташовані', 'Пароль Wi-Fi', 'Відповідальна особа'],
     scan1: 'Скануйте, щоб підключитися до Wi-Fi', scan2: 'Скануйте, щоб відкрити застосунок',
+  },
+  de: {
+    lang: 'de', title: 'Lokales Netz, kein Internet nötig',
+    sub: 'Chat, private Nachrichten, gemeinsame Daten und Notfallmeldungen, die auch ohne Internet funktionieren.',
+    s1: 'Mit dem WLAN verbinden', s1t: 'Scannen Sie den ersten Code oder öffnen Sie die WLAN-Einstellungen Ihres Handys und wählen Sie das Netz',
+    pw: 'Passwort:', open: '(ohne Passwort)',
+    s2: 'App öffnen', s2t: 'Eine Seite öffnet sich von selbst. Falls nicht, scannen Sie den zweiten Code oder geben Sie',
+    s2n: 'im normalen Browser ein (Chrome, Safari). Wenn ein kleines Pop-up-Fenster Ihren Namen immer wieder vergisst, nutzen Sie stattdessen den normalen Browser.',
+    s3: 'Namen wählen', s3t: 'Geben Sie einen Namen ein, wenn Sie gefragt werden. Tippen Sie oben rechts auf Ihren Namen, um ihn später zu ändern.',
+    howTitle: 'So funktioniert es',
+    how: [
+      ['Reiter Chat', '„Alle“ ist der Gruppenchat. Tippen Sie auf einen Namen, um privat zu schreiben. Mit „+ Raum“ treten Sie einem Themenraum bei, zum Beispiel „Wache“.'],
+      ['✓ ✓✓ ⏳', '✓ gesendet. ✓✓ zugestellt. ⏳ gespeichert: wird zugestellt, sobald die Person wieder im Netz ist.'],
+      ['Knopf 🚨', 'Löst auf jedem Gerät einen lauten roten Alarm aus. Nur für echte Notfälle. Jeder kann ihn wieder löschen.'],
+      ['Knopf ❗', 'Markiert Ihre nächste Nachricht als wichtig: rot hervorgehoben, mit Ton und Vibration beim Empfänger.'],
+      ['Reiter Daten', 'Gemeinsame Notizen und Werte für alle, zum Beispiel Wasserstand oder Treibstoff.'],
+      ['Reiter Knoten', 'Zeigt, welche Relaisboxen laufen, wie weit sie entfernt sind und welche Spannung sie haben.'],
+    ],
+    goodTitle: 'Gut zu wissen',
+    good: ['Es gibt kein Internet. Nur Personen in diesem Netz sehen Ihre Nachrichten.', 'Nachrichten sind kurzer Text, bis etwa 176 Zeichen.', 'Die Knoten gleichen die Uhrzeit ab. Weicht die Uhr Ihres Handys stark ab, weist die App darauf hin.', 'Relaisboxen speichern Nachrichten für Offline-Personen, solange sie Strom haben.'],
+    fill: ['Relaisboxen stehen bei', 'WLAN-Passwort', 'Ansprechperson'],
+    scan1: 'Scannen, um dem WLAN beizutreten', scan2: 'Scannen, um die App zu öffnen',
   },
 };
 
@@ -72,12 +96,12 @@ function html(t) {
 <style>
 @page { size: A4; margin: 11mm; }
 * { box-sizing: border-box; }
-body { margin: 0; font: 11.5pt/1.3 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #111; }
+body { margin: 0; font: 10.6pt/1.28 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #111; }
 header { border-bottom: 3px solid #111; padding-bottom: 6px; margin-bottom: 10px; }
-h1 { margin: 0; font-size: 30pt; letter-spacing: .5px; }
+h1 { margin: 0; font-size: 28pt; letter-spacing: .5px; }
 header p { margin: 2px 0 0; font-size: 12.5pt; color: #333; }
-.top { display: grid; grid-template-columns: 1fr 50mm; gap: 12px; }
-.step { display: flex; gap: 10px; margin-bottom: 9px; }
+.top { display: grid; grid-template-columns: 1fr 46mm; gap: 12px; }
+.step { display: flex; gap: 10px; margin-bottom: 6px; }
 .num { flex: none; width: 28px; height: 28px; border-radius: 50%; background: #111; color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 14pt; margin-top: 2px; }
 .step h2 { margin: 0; font-size: 14pt; } .step p { margin: 1px 0 0; }
 code, .tag { font-family: ui-monospace, Menlo, monospace; background: #eee; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
@@ -85,10 +109,10 @@ code, .tag { font-family: ui-monospace, Menlo, monospace; background: #eee; padd
 .qr { border: 2px solid #111; border-radius: 10px; padding: 6px; text-align: center; }
 .qr svg { width: 100%; height: auto; display: block; }
 .qr b { display: block; font-size: 10.5pt; line-height: 1.2; }
-h3 { margin: 9px 0 4px; font-size: 14pt; border-bottom: 1px solid #999; padding-bottom: 2px; }
+h3 { margin: 7px 0 3px; font-size: 13pt; border-bottom: 1px solid #999; padding-bottom: 2px; }
 table { border-collapse: collapse; width: 100%; }
-td { padding: 3px 6px; vertical-align: top; border-bottom: 1px solid #ddd; }
-td:first-child { width: 31mm; font-weight: 700; white-space: nowrap; }
+td { padding: 2px 6px; vertical-align: top; border-bottom: 1px solid #ddd; }
+td:first-child { width: 29mm; font-weight: 700; white-space: nowrap; }
 ul { margin: 4px 0 0 18px; padding: 0; } li { margin: 2px 0; }
 .fill { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 8px; }
 .fill div { border-bottom: 1.5px solid #111; padding-top: 16px; font-size: 10.5pt; color: #333; }

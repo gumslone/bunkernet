@@ -50,10 +50,11 @@ async function main() {
     await cdp('Page.enable');
     await cdp('Emulation.setDeviceMetricsOverride', { width: 390, height: 640, deviceScaleFactor: 2, mobile: true });
     await cdp('Emulation.setLocaleOverride', { locale: 'en-US' });
-    const open = async () => {
+    const watch = (await (await fetch(`http://127.0.0.1:${MOCK}/__room`)).json()).watch;
+    const open = async (lang = 'en') => {
       await cdp('Page.navigate', { url: `http://127.0.0.1:${MOCK}/` });
       await sleep(600);
-      await js("localStorage.setItem('uid','0000d004');localStorage.setItem('contacts','{\"0000e005\":\"Sam\"}');localStorage.setItem('name','Olek');location.reload()");
+      await js(`localStorage.setItem('uid','0000d004');localStorage.setItem('contacts','{"0000e005":"Sam"}');localStorage.setItem('rooms','{"${watch}":"watch"}');localStorage.setItem('lang','${lang}');localStorage.setItem('name','Olek');location.reload()`);
       await sleep(1200);
     };
 
@@ -67,6 +68,9 @@ async function main() {
     await js("document.querySelector('.chip[data-c=\"0000e005\"]').click()");
     await shot('offline');
 
+    await js(`document.querySelector('.chip[data-c="r:${watch}"]').click()`);
+    await shot('rooms');
+
     await js("document.querySelector('nav button[data-t=data]').click()");
     await shot('data');
 
@@ -76,6 +80,12 @@ async function main() {
     await fetch(`http://127.0.0.1:${MOCK}/__alert?on=1`);
     await open();
     await shot('alert');
+
+    await fetch(`http://127.0.0.1:${MOCK}/__alert?on=0`);
+    await fetch(`http://127.0.0.1:${MOCK}/__skew?m=7`);
+    await open('de');
+    await shot('chat-de');
+    await fetch(`http://127.0.0.1:${MOCK}/__skew?m=0`);
     ws.close();
   } finally {
     chrome.kill(); mock.kill();

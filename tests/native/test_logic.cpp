@@ -89,8 +89,8 @@ static void test_auth() {
 static void test_mailbox() {
   bn::Mailbox<3> mb;
   uint32_t t = 0;
-  bn::Mail* m = mb.store(1, 2, 100, 555, "Ann", "hi", true, t);
-  CHECK(m && mb.find(100) == m);
+  bn::Mail* m = mb.store(1, 2, 100, 555, "Ann", "hi", true, t, true);
+  CHECK(m && mb.find(100) == m && m->prio);
   CHECK(mb.due(t + 29000) == nullptr);                   // first retry after 30 s
   CHECK(mb.due(t + 30000) == m);
   mb.retried(m, t + 30000);
@@ -125,6 +125,62 @@ static void test_mailbox() {
   while (g.due(now + 100000000u) && n < 50) { gm = g.due(now + 100000000u); g.retried(gm, now); n++; }
   CHECK(n == (int)bn::RETRY_N);
   CHECK(!gm->mine);
+}
+
+// ----------------------------------------------------------------- clock
+static void test_clock() {
+  const uint32_t T0 = 1800000000UL;                       // some plausible Unix time
+  bn::MeshClock c;
+  CHECK(!c.known());
+  CHECK(c.stamp(123, 0) == 123);                          // unknown clock: pass the sender's through
+  c.feed(1, 5, 1000);                                     // 1970-ish device clock is ignored
+  CHECK(!c.known());
+  c.feed(1, T0, 1000);
+  CHECK(c.known());
+  CHECK(c.now(1000) == T0);
+  CHECK(c.now(61000) == T0 + 60);                         // runs on its own
+
+  // one wrong phone is outvoted by three right ones
+  bn::MeshClock d;
+  d.feed(10, T0, 0);
+  d.feed(11, T0 + 3600, 0);                               // an hour off
+  d.feed(12, T0 + 1, 0);
+  d.feed(13, T0, 0);
+  CHECK(d.now(0) >= T0 && d.now(0) <= T0 + 1);
+  d.feed(11, T0 + 3600 + 5, 5000);                        // the wrong phone keeps talking
+  d.feed(11, T0 + 3600 + 6, 6000);
+  CHECK(d.now(6000) < T0 + 20);                           // still not swayed
+
+  // the first source was wrong, then correct ones arrive: it recovers
+  bn::MeshClock e;
+  e.feed(1, T0 + 7200, 0);
+  CHECK(e.now(0) == T0 + 7200);
+  e.feed(2, T0, 1000);                                    // 2 sources disagree: no change yet
+  CHECK(e.now(1000) == T0 + 7201);
+  e.feed(3, T0, 2000);                                    // two agree: majority wins
+  CHECK(e.now(2000) >= T0 + 1 && e.now(2000) <= T0 + 3);
+
+  // a lone, different, unrelated source does not hijack a known clock
+  bn::MeshClock f;
+  f.feed(1, T0, 0);
+  f.feed(2, T0 + 5000, 100);
+  CHECK(f.now(100) <= T0 + 1);
+
+  // stamp: a plausible sender time is kept, a wild one is replaced by the mesh time
+  bn::MeshClock g;
+  g.feed(1, T0, 0);
+  CHECK(g.stamp(T0 + 100, 0) == T0 + 100);
+  CHECK(g.stamp(T0 - 3000, 0) == T0);
+  CHECK(g.stamp(0, 0) == T0);                             // API client without a timestamp
+  CHECK(g.stamp(T0 + 4000, 0) == T0);
+
+  // readings expire, rebase survives the millisecond counter wrapping
+  bn::MeshClock h;
+  h.feed(1, T0, 0);
+  h.rebase(0xFFFFFF00u);
+  CHECK(h.now(0xFFFFFF00u) == T0 + 0xFFFFFF00u / 1000);
+  uint32_t before = h.now(0xFFFFFF00u);
+  CHECK(h.now(0xFFFFFF00u + 5000) == before + 5);         // across the wrap
 }
 
 // ----------------------------------------------------------------- flood simulation
@@ -239,6 +295,7 @@ int main() {
   test_replay();
   test_auth();
   test_mailbox();
+  test_clock();
   test_flood();
   if (failures) { std::printf("%d check(s) FAILED\n", failures); return 1; }
   std::printf("all tests passed\n");

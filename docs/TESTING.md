@@ -49,6 +49,20 @@ and 2 phones**. Tick each item, and send back anything that fails together with 
 - [ ] **Relay-only:** flash a fourth module with `pio run -e esp01_relay -t upload`. It
       should appear on the **Nodes** tab, relay messages, and show no Wi-Fi network.
 
+## 4b. Newer features
+- [ ] **Rooms:** on both phones tap *+ Room*, type `watch` on each. Messages in the room reach
+      only phones that joined it, and the unread badge appears on the chip.
+- [ ] **Priority:** send a message with ❗ from phone 1. Phone 2 shows it highlighted and beeps
+      or vibrates (it needs a tap on the page first on some phones, for sound).
+- [ ] **Shared clock:** let phone 1 (correct clock) use the mesh for a minute first, so the nodes
+      know the right time. Then set phone 2's clock a few minutes wrong (turn off automatic time). Within
+      ~15 s the page shows the 🕐 hint, and a message it sends carries the correct time.
+      Check the **Nodes** tab shows a plausible *mesh time*.
+- [ ] **Supply voltage:** the **Nodes** tab shows a voltage for each node (about 3.3 V). Note
+      any that read below 3.0 V.
+- [ ] **Languages:** switch the page to Deutsch and Українська from the name dialog and check
+      that nothing is cut off.
+
 ## 5. Phones and the pop-up
 - [ ] iPhone: joining the Wi-Fi opens the page automatically. Does it remember your name
       after closing the pop-up? Does it work in Safari at `http://192.168.4.1`?
@@ -60,6 +74,15 @@ and 2 phones**. Tick each item, and send back anything that fails together with 
 ## 6. Range (optional)
 Walk away from one node with a phone until it drops, in the open and through walls.
 Open air ______ m, one wall ______ m, two walls ______ m.
+
+**802.11b experiment:** build two nodes with `#define MESH_PHY_11B 1` in `config.local.h` (the
+same on both), put them where the normal build just barely loses the link, and see if they now
+stay connected. Repeat the walk above. Record the distances ______ m, ______ m, ______ m. Keep the
+setting only if it helps and nothing else gets worse (page speed, phones that won't join).
+
+**Browser update (2 MB+ boards only):** with `OTA_PASSWORD` set, open
+`http://192.168.4.1/update` and upload a `.bin`. Check that the node reboots into the new version
+and keeps its stored messages.
 
 ## Reporting
 For anything that fails, send: the firmware version, the board, what you did, what you saw, and
