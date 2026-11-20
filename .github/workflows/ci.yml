@@ -64,6 +64,6 @@ jobs:
       - name: cppcheck on the hardware-independent logic and its tests
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
-          cppcheck --std=c++17 --enable=warning,performance,portability --inline-suppr \
+          cppcheck --language=c++ --std=c++17 --enable=warning,performance,portability --inline-suppr \
             --error-exitcode=1 --suppress=missingIncludeSystem \
             firmware/bunkernet/mesh_logic.h tests/native/test_logic.cpp
