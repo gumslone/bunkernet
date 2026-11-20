@@ -175,6 +175,22 @@ of them in the git-ignored `config.local.h` (`tools/new-psk.sh` creates it):
   hops away.
 - One node serves about 6 devices, so add nodes where people gather.
 
+## Printable join sheet
+
+Put a sheet next to the nodes so anyone can join without help: a Wi-Fi QR code, a QR code that
+opens the app, three steps and a short guide to the buttons, with spaces to write down where
+the nodes are and who to ask. Ready-made one-page A4 PDFs for the default network (no password):
+[English](docs/join-sheet-en.pdf) and [Ukrainian](docs/join-sheet-uk.pdf).
+
+Make one for your own network name and password (needs Node 18+, and Chrome for the PDF):
+
+```bash
+node tools/join-sheet/make_sheet.js --ssid BunkerNet --password "your wifi password" --lang all
+```
+
+The QR encoder in `tools/join-sheet/qr.js` has no dependencies. `node tools/join-sheet/verify_qr.js`
+decodes its output with Chrome's barcode reader as a check.
+
 ## Bunker and off-grid notes
 
 - **Power:** an ESP-01 draws roughly 70–150 mA. Use a USB power bank, or a 12V battery with a
@@ -189,6 +205,12 @@ of them in the git-ignored `config.local.h` (`tools/new-psk.sh` creates it):
 - **Reflashing a node:** a normal upload keeps its saved state. If you erase the flash it picks
   a fresh boot counter. Its neighbours may ignore it for up to 10 minutes if that counter
   happens to be lower than before.
+
+## Trying it on real hardware
+
+[`docs/TESTING.md`](docs/TESTING.md) is a one-hour checklist for 3 nodes and 2 phones: boot and
+memory, mesh links, private and offline delivery, power cuts, roaming, alerts, the pop-up on
+iPhone and Android, and range.
 
 ## HTTP API
 
