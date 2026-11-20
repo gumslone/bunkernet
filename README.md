@@ -27,7 +27,12 @@ scenario, but it works equally well for a cabin, a festival or a blackout.
   writable from the web page or through the HTTP API (for sensors and scripts).
 - **Node map:** which nodes are alive and how many hops away, to help you place them.
 - **Encrypted mesh:** every packet is ChaCha20-Poly1305 encrypted and authenticated with a
-  pre-shared key.
+  pre-shared key (stretched with PBKDF2). Replayed and duplicate packets are rejected.
+- **Private means private:** each person's id is protected by a secret token kept in their
+  browser, so another user on the same node can't read their private messages or pose as them.
+- **Survives power cuts:** stored messages, identity claims and the boot counter are kept in
+  the node's flash.
+- **Relay-only nodes:** a build with no access point or web server, to extend range cheaply.
 - **Self-healing:** no routing tables and no links to break. If a node dies, packets take
   another path.
 - **Roaming:** every node uses the same SSID and address (192.168.4.1), so a phone moves to
@@ -59,13 +64,20 @@ The web app is served by every node and works in any phone or laptop browser.
 ```
 
 - **Backbone:** ESP-NOW broadcast flooding on one fixed channel. Every packet carries a hop
-  limit (TTL) and a unique id. Nodes remember recent ids to drop duplicates, then relay each
-  new packet after a small random delay to avoid collisions.
+  limit (TTL) and a nonce of origin, boot counter and sequence number. Each node tracks the
+  newest sequence number per origin (with a 32-packet window), which drops duplicates and
+  rejects recorded packets that are replayed later. New packets are relayed after a small
+  random delay to avoid collisions. Periodic traffic (node announcements, presence) is not
+  relayed when neighbours already did it, and node announcements travel at most 4 hops, which
+  keeps large meshes from drowning in their own chatter. Chat, private messages, data and
+  alerts are always relayed.
 - **Access:** every node is a soft access point on the same channel, with a captive portal
   that serves the web app. The page polls the node over HTTP, so any browser works.
-- **Identity:** the browser generates a random id and asks for a display name, both kept in
-  local storage. Private messages are addressed to the id, so renaming never breaks a chat.
-  Names are not unique and nothing stops two people choosing the same one.
+- **Identity:** the browser generates a random id plus a secret token and asks for a display
+  name, all kept in local storage. Private messages are addressed to the id, so renaming never
+  breaks a chat. The first time an id appears, the node keeps a short hash of its token and
+  floods that claim to the other nodes. From then on every request for that id must present
+  the token. Names are not unique and nothing stops two people choosing the same one.
 - **Time:** the nodes have no clock (an ESP8266 has no battery-backed RTC), so each message
   carries the sender's own phone or laptop time, and everyone sees the same stamp. If a
   device's clock is wrong its messages will show the wrong time.
@@ -75,7 +87,8 @@ The web app is served by every node and works in any phone or laptop browser.
   drop their copy. The node that originated a message also re-sends it on a back-off schedule
   (30 s, 1 min, 2 min, 5 min … up to about 10 hours) so nodes that were off or out of range
   catch up. The browser remembers people it has seen, so you can message someone who is
-  currently offline.
+  currently offline. The mailbox and identity claims are saved to flash (at most once a
+  minute), so they also survive a power cut.
 - **Delivery receipts:** a private message is acknowledged when the recipient's device
   actually fetches it, and the receipt floods back to the sender's node.
 
@@ -123,8 +136,13 @@ nothing to install. Build with `pio run`, then flash
 `.pio/build/esp01_1m/firmware.bin` (or a release binary) at offset `0x0`. Use it to flash
 many modules quickly and to read each node's serial log.
 
-Other boards: `pio run -e nodemcuv2 -t upload` for NodeMCU. Add more targets to
-[`platformio.ini`](platformio.ini) as needed.
+Other targets: `pio run -e nodemcuv2 -t upload` for NodeMCU, and `pio run -e esp01_relay -t upload`
+for a **relay-only** ESP-01 with no access point and no web server, for filling coverage gaps
+where nobody needs to connect. A relay still relays everything and holds stored messages. Add more
+targets to [`platformio.ini`](platformio.ini) as needed.
+
+The ESP-01 build reserves 128 KB of its 1 MB flash for the filesystem that keeps stored
+messages, so flash the firmware over serial as usual and leave that area alone.
 
 ### Arduino IDE
 
@@ -144,6 +162,7 @@ of them in the git-ignored `config.local.h` (`tools/new-psk.sh` creates it):
 | `AP_PASSWORD` | `""` (open) | Optional WPA2 password for the phone-to-node link |
 | `MESH_CHANNEL` | `1` | Wi-Fi channel for the whole mesh (pick a quiet one) |
 | `MESH_TTL` | `8` | Max hops |
+| `BEACON_TTL` | `4` | Max hops for node announcements (the Nodes tab only lists nodes this close) |
 | `MAX_CLIENTS` | `6` | Devices per node |
 | `SOS_PIN` | `-1` (off) | GPIO for a push button to GND (ESP-01: GPIO2) |
 | `LED_PIN` | `-1` (off) | Activity LED (ESP-01S: GPIO2, active low) |
@@ -164,25 +183,31 @@ of them in the git-ignored `config.local.h` (`tools/new-psk.sh` creates it):
   and a USB-serial adapter together in a waterproof bag.
 - **Offline rebuilds:** build once now, then back up this repository and the `~/.platformio`
   folder so you can re-flash with no network.
-- **Reset:** history is only held in RAM, so a power cycle clears it. That is by design.
+- **Reset:** chat history is only held in RAM, so a power cycle clears it. Stored private
+  messages and identities are kept in flash. To wipe a node, erase its flash
+  (`pio run -t erase`).
+- **Reflashing a node:** a normal upload keeps its saved state. If you erase the flash it picks
+  a fresh boot counter. Its neighbours may ignore it for up to 10 minutes if that counter
+  happens to be lower than before.
 
 ## HTTP API
 
-Scripts and sensors on the mesh Wi-Fi can talk to any node. IDs are 32-bit hex strings you
-choose (non-zero).
+Scripts and sensors on the mesh Wi-Fi can talk to any node. Pick an id (32-bit hex, non-zero)
+and a secret `tok` (16-64 characters) once and keep using them. Every request except `/nodes`
+must include both `me` and `tok`. The first request claims the id, later ones must match.
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /send` | `me`, `name`, `to` (`0` = everyone), `x` (text), `ts` (optional unix seconds) |
-| `POST /put` | `me`, `name`, `k`, `v`, `ts` (optional): set a data-board entry |
-| `POST /alert`, `POST /alertclear` | `me`, `name`, `x` / `me`, `m` |
-| `GET /poll` | `me`, `name`, `since`, `dv`, `av`: new messages, users, data, alerts |
+| `POST /send` | `me`, `tok`, `name`, `to` (`0` = everyone), `x` (text), `ts` (optional unix seconds) |
+| `POST /put` | `me`, `tok`, `name`, `k`, `v`, `ts` (optional): set a data-board entry |
+| `POST /alert`, `POST /alertclear` | `me`, `tok`, `name`, `x` / `me`, `tok`, `m` |
+| `GET /poll` | `me`, `tok`, `name`, `since`, `dv`, `av`: new messages, users, data, alerts |
 | `GET /nodes` | Known nodes, hops and node stats |
 
 Example: publish a sensor value from a script.
 
 ```bash
-curl -d "me=0000a001&name=cellar&k=temp&v=14.2C" http://192.168.4.1/put
+curl -d "me=0000a001&tok=0123456789abcdef0123&name=cellar&k=temp&v=14.2C" http://192.168.4.1/put
 ```
 
 ## Protocol
@@ -190,26 +215,35 @@ curl -d "me=0000a001&name=cellar&k=temp&v=14.2C" http://192.168.4.1/put
 Packets are at most 250 bytes: `magic | ttl | origin(4) boot(4) seq(4) | len | ciphertext | tag(16)`.
 The 12-byte nonce (origin, boot id, sequence number) is authenticated as additional data.
 The payload holds the message type, original TTL, sender, recipient, message id, sender timestamp, name and text.
+Presence packets also carry the sender's identity claim (a hash of their token). The boot
+counter is saved in flash and grows on every reboot, so a recorded packet from an earlier boot
+is rejected as a replay. The mesh key is `PBKDF2-HMAC-SHA256(MESH_PSK, 4096 rounds)`.
 Types: chat, DM, presence, beacon, ACK, data, alert. See
 [`bunkernet.ino`](firmware/bunkernet/bunkernet.ino).
 
 ## Limits
 
-- Text only, 140 characters per message. No files, voice or images.
+- Text only, up to 176 bytes per message (about 88 Cyrillic letters or 176 Latin ones). No
+  files, voice or images.
 - Range is plain 2.4 GHz Wi-Fi, extended only by adding nodes (hops).
 - The hop counter (TTL) is not authenticated, so a nearby attacker can only affect how far a
   packet spreads, not its contents.
-- The link between a phone and its node is open unless you set `AP_PASSWORD`. Only the node
-  to node traffic is encrypted.
-- No persistence. Messages are kept in RAM, about the last 28 chat messages and 12 stored
-  private messages per node. Stored messages survive as long as at least one node holding
-  them stays powered. If every holder loses power, or more than 12 are waiting, the oldest
-  are lost.
+- The link between a phone and its node is open, plain HTTP unless you set `AP_PASSWORD`, so
+  someone nearby could sniff a user's token and chat. **Set a WPA2 `AP_PASSWORD`** and share it
+  with your people if that matters. Mesh traffic between nodes is always encrypted.
+- Identities are claimed on first use. If an attacker reaches a node and claims someone's id
+  before that person's own claim has spread, the real owner is locked out on that node and the
+  page quietly gives them a new identity. It is an unlikely race, but not impossible.
+- Chat history is kept in RAM, about the last 28 messages per node. Stored private messages (12
+  per node) are saved to flash and survive power cuts. They are lost if every holder is
+  wiped, or if more than 12 are waiting, the oldest go first.
+- RAM is tight on an ESP-01: about 60% is used before the web server runs. The Nodes tab shows
+  free heap, and a node under 5 KB stops serving pages rather than crash.
 
 ## Development
 
-CI (GitHub Actions) builds every PlatformIO environment on each push and pull request and
-syntax-checks the embedded web UI script. Pushing a tag like `v0.1.0` builds all targets and
+CI (GitHub Actions) builds every PlatformIO environment on each push and pull request,
+syntax-checks the embedded web UI script and runs the native tests. Pushing a tag like `v0.1.0` builds all targets and
 publishes a GitHub release with the firmware binaries and checksums. Release binaries use the
 public default key, so they are for testing only.
 
@@ -217,7 +251,16 @@ public default key, so they are for testing only.
 pio run                 # build default target
 pio run -e nodemcuv2    # build another target
 pio device monitor      # serial log at 115200
+
+# native tests: replay window, identity table, mailbox, UTF-8 handling and a flood simulation
+g++ -std=c++17 -O1 -Wall -Wextra tests/native/test_logic.cpp -o /tmp/bn_test && /tmp/bn_test
 ```
+
+The hardware-independent logic lives in [`mesh_logic.h`](firmware/bunkernet/mesh_logic.h) so it
+runs both on the ESP8266 and in the tests. The flood simulation checks that every node is
+reached, that the hop limit holds, and that relay damping saves transmissions without losing
+coverage. It tests the algorithms, not the radio, so it does not replace trying the mesh on
+real modules.
 
 ## License
 

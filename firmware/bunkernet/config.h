@@ -34,6 +34,9 @@
 #ifndef MESH_TTL
 #define MESH_TTL       8           // max hops a packet travels
 #endif
+#ifndef BEACON_TTL
+#define BEACON_TTL     4           // hops a node announcement travels (limits periodic traffic)
+#endif
 #define BEACON_MS      10000UL     // node announce interval
 #define PRESENCE_MS    15000UL     // user presence re-announce interval
 #define USER_TTL_MS    50000UL     // user considered offline after this

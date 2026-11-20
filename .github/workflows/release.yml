@@ -19,9 +19,11 @@ jobs:
       - name: Build all targets
         run: |
           pio run
+          pio run -e esp01_relay
           pio run -e nodemcuv2
           mkdir dist
           cp .pio/build/esp01_1m/firmware.bin dist/bunkernet-esp01_1m-${{ github.ref_name }}.bin
+          cp .pio/build/esp01_relay/firmware.bin dist/bunkernet-esp01-relay-${{ github.ref_name }}.bin
           cp .pio/build/nodemcuv2/firmware.bin dist/bunkernet-nodemcuv2-${{ github.ref_name }}.bin
           (cd dist && sha256sum *.bin > SHA256SUMS)
       - name: Publish release

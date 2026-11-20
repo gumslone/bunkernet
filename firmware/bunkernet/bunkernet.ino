@@ -1,18 +1,28 @@
 // BunkerNet - offline mesh network for ESP8266 / ESP-01
 //
-// Backbone : ESP-NOW broadcast flooding (TTL + dedupe), encrypted with ChaCha20-Poly1305
+// Backbone : ESP-NOW broadcast flooding (TTL + replay window), encrypted with ChaCha20-Poly1305
 // Clients  : each node is a Wi-Fi AP (same SSID everywhere) + captive portal web app
-// Features : group chat, direct messages with delivery receipts, shared data board,
-//            node map. Same firmware on every node.
+// Features : group chat, direct messages with delivery receipts and store-and-forward,
+//            shared data board, emergency alerts, node map. Same firmware on every node.
+// Build with -DRELAY_ONLY=1 for a node that only relays (no access point, no web server).
 
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <DNSServer.h>
 #include <espnow.h>
+#include <LittleFS.h>
 #include <bearssl/bearssl.h>
+extern "C" {
+#include <user_interface.h>
+}
 #include "config.h"
+#include "mesh_logic.h"
 #include "web_ui.h"
+
+#ifndef RELAY_ONLY
+#define RELAY_ONLY 0
+#endif
 
 // ---------------------------------------------------------------- constants
 #define MAGIC        0xA7
@@ -24,14 +34,17 @@
 #define PKT_MAX      250
 #define PT_MAX       (PKT_MAX - OFF_PAYLOAD - TAG_LEN)   // 219
 #define PT_HDR       19         // type ittl from to mid ts nlen
-#define NAME_MAX_LEN 15
-#define TEXT_MAX_LEN 140
+#define NAME_MAX_LEN BN_NAME_MAX
+#define TEXT_MAX_LEN BN_TEXT_MAX
 
 enum : uint8_t { T_CHAT = 1, T_DM = 2, T_PRESENCE = 3, T_BEACON = 4, T_ACK = 5, T_DATA = 6, T_ALERT = 7 };
 
 #define RXQ_N   8
 #define TXQ_N   16
-#define SEEN_N  96
+#define REPLAY_N 24
+#define AUTH_N  24
+#define STATE_SAVE_MS 60000UL
+#define PBKDF2_ITERS  4096
 #define LOG_N   28
 #define USERS_N 20
 #define NODES_N 16
@@ -41,12 +54,15 @@ enum : uint8_t { T_CHAT = 1, T_DM = 2, T_PRESENCE = 3, T_BEACON = 4, T_ACK = 5, 
 
 // ---------------------------------------------------------------- state
 static const uint8_t BCAST[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-static uint32_t myId, bootId, seqNo = 0;
+static uint32_t myId, bootCount = 1, seqNo = 0;
+static bool usingDefaultKey = false;
 static uint8_t  meshKey[32];
 static char     nodeName[NAME_MAX_LEN + 1];
 
+#if !RELAY_ONLY
 ESP8266WebServer server(80);
 DNSServer        dns;
+#endif
 
 // receive queue (filled from the ESP-NOW callback, drained in loop())
 struct RxPkt { uint8_t len; uint8_t d[PKT_MAX]; };
@@ -54,12 +70,16 @@ static RxPkt rxq[RXQ_N];
 static volatile uint8_t rxHead = 0, rxTail = 0;
 
 // transmit queue with per-packet send time (jitter avoids collisions)
-struct TxPkt { bool used; uint8_t len; uint32_t at; uint8_t d[PKT_MAX]; };
+struct TxPkt { bool used, damp; uint8_t len, dupes; uint32_t at, key; uint8_t d[PKT_MAX]; };
 static TxPkt txq[TXQ_N];
 static uint32_t lastTx = 0;
 
-static uint32_t seenHash[SEEN_N];
-static uint8_t  seenIdx = 0;
+static bn::ReplayTable<REPLAY_N> replay;
+static bn::AuthTable<AUTH_N> authTab;
+static bn::Mailbox<MAIL_N> mailbox;
+static bool stateDirty = false;
+static uint32_t lastSave = 0;
+using bn::Mail;
 
 // message log shown to local clients
 struct LogEnt {
@@ -70,21 +90,6 @@ struct LogEnt {
 };
 static LogEnt  logRing[LOG_N];
 static uint32_t logCount = 0;
-
-// Store-and-forward mailbox: every node keeps a copy of each direct message until a
-// delivery receipt for it is seen. The recipient can then collect it from ANY node whenever
-// they next appear, even hours later or after roaming. The node that originated a message
-// also re-floods it on a back-off schedule so nodes that missed it (down, out of range) catch up.
-struct Mail {
-  bool used, delivered, mine; uint8_t tries;
-  uint32_t from, to, mid, ts, next, lastAck;
-  char name[NAME_MAX_LEN + 1];
-  char text[TEXT_MAX_LEN + 1];
-};
-static Mail mailbox[MAIL_N];
-static uint8_t mailRR = 0;
-static const uint16_t RETRY_S[] = {30, 60, 120, 300, 600, 1200, 1800, 3600, 3600, 7200, 7200, 14400};
-#define RETRY_N (sizeof(RETRY_S) / sizeof(RETRY_S[0]))
 
 struct User {
   uint32_t id; uint32_t node; uint32_t seen; bool needPresence;
@@ -124,17 +129,10 @@ static uint32_t fnv(const uint8_t* p, size_t n) {
 
 // copy at most max bytes without cutting a UTF-8 character in half
 static void copyUtf8(char* dst, const char* src, size_t srcLen, size_t max) {
-  size_t n = srcLen < max ? srcLen : max;
-  while (n > 0 && n < srcLen && (((uint8_t)src[n]) & 0xC0) == 0x80) n--;
+  size_t n = bn::utf8_fit(src, srcLen, max);
   memcpy(dst, src, n);
   dst[n] = 0;
 }
-
-static bool isSeen(uint32_t h) {
-  for (uint8_t i = 0; i < SEEN_N; i++) if (seenHash[i] == h) return true;
-  return false;
-}
-static void markSeen(uint32_t h) { seenHash[seenIdx] = h; seenIdx = (seenIdx + 1) % SEEN_N; }
 
 static void led(bool on) {
 #if LED_PIN >= 0
@@ -143,10 +141,11 @@ static void led(bool on) {
 }
 
 // ---------------------------------------------------------------- tx queue
-static void txEnqueue(const uint8_t* d, uint8_t len, uint32_t at) {
+static void txEnqueue(const uint8_t* d, uint8_t len, uint32_t at, uint32_t key = 0, bool damp = false) {
   for (uint8_t i = 0; i < TXQ_N; i++) {
     if (!txq[i].used) {
       txq[i].used = true; txq[i].len = len; txq[i].at = at;
+      txq[i].key = key; txq[i].damp = damp; txq[i].dupes = 0;
       memcpy(txq[i].d, d, len);
       return;
     }
@@ -159,21 +158,30 @@ static void txPump() {
   if (now - lastTx < 6) return;
   for (uint8_t i = 0; i < TXQ_N; i++) {
     if (txq[i].used && (int32_t)(now - txq[i].at) >= 0) {
+      txq[i].used = false;
+      // periodic traffic (beacons, presence) is skipped when neighbours already relayed it
+      if (txq[i].damp && bn::relay_damped(txq[i].dupes, rnd32())) continue;
       esp_now_send((uint8_t*)BCAST, txq[i].d, txq[i].len);
-      txq[i].used = false; lastTx = now; led(true);
+      lastTx = now; led(true);
       return;
     }
   }
 }
 
+// a copy of a packet we are about to relay was heard from another node
+static void noteDuplicate(uint32_t key) {
+  for (uint8_t i = 0; i < TXQ_N; i++)
+    if (txq[i].used && txq[i].damp && txq[i].key == key && txq[i].dupes < 255) txq[i].dupes++;
+}
+
 // ---------------------------------------------------------------- mesh send
 static uint32_t meshSend(uint8_t type, uint32_t from, uint32_t to, uint32_t mid,
-                         const char* name, const char* text, uint32_t ts = 0) {
+                         const char* name, const char* text, uint32_t ts = 0, uint8_t ttl = MESH_TTL) {
   uint8_t pt[PT_MAX];
   size_t nl = strlen(name); if (nl > NAME_MAX_LEN) nl = NAME_MAX_LEN;
   size_t tl = strlen(text); if (tl > TEXT_MAX_LEN) tl = TEXT_MAX_LEN;
   if (mid == 0) mid = rnd32() | 1;
-  pt[0] = type; pt[1] = MESH_TTL;
+  pt[0] = type; pt[1] = ttl;
   put32(pt + 2, from); put32(pt + 6, to); put32(pt + 10, mid); put32(pt + 14, ts);
   pt[18] = (uint8_t)nl;
   memcpy(pt + PT_HDR, name, nl);
@@ -181,9 +189,9 @@ static uint32_t meshSend(uint8_t type, uint32_t from, uint32_t to, uint32_t mid,
   size_t n = PT_HDR + nl + tl;
 
   uint8_t pkt[PKT_MAX];
-  pkt[0] = MAGIC; pkt[OFF_TTL] = MESH_TTL;
+  pkt[0] = MAGIC; pkt[OFF_TTL] = ttl;
   seqNo++;
-  put32(pkt + OFF_NONCE, myId); put32(pkt + OFF_NONCE + 4, bootId); put32(pkt + OFF_NONCE + 8, seqNo);
+  put32(pkt + OFF_NONCE, myId); put32(pkt + OFF_NONCE + 4, bootCount); put32(pkt + OFF_NONCE + 8, seqNo);
   pkt[OFF_LEN] = (uint8_t)n;
   memcpy(pkt + OFF_PAYLOAD, pt, n);
   uint8_t tag[TAG_LEN];
@@ -191,7 +199,6 @@ static uint32_t meshSend(uint8_t type, uint32_t from, uint32_t to, uint32_t mid,
                         pkt + OFF_NONCE, 12, tag, br_chacha20_ct_run, 1);
   memcpy(pkt + OFF_PAYLOAD + n, tag, TAG_LEN);
 
-  markSeen(fnv(pkt + OFF_NONCE, 12));
   txEnqueue(pkt, OFF_PAYLOAD + n + TAG_LEN, millis() + 2 + rnd32() % 12);
   return mid;
 }
@@ -264,29 +271,16 @@ static LogEnt* addLog(uint8_t type, uint32_t from, uint32_t to, uint32_t mid,
   return &e;
 }
 
-static Mail* findMail(uint32_t mid) {
-  for (auto& m : mailbox) if (m.used && m.mid == mid) return &m;
-  return nullptr;
-}
+static Mail* findMail(uint32_t mid) { return mailbox.find(mid); }
 
 static void markDelivered(uint32_t mid) {
-  Mail* m = findMail(mid);
-  if (m) m->delivered = true;
+  if (mailbox.markDelivered(mid)) stateDirty = true;
 }
 
 static Mail* storeMail(uint32_t from, uint32_t to, uint32_t mid, uint32_t ts,
                        const char* name, const char* text, bool mine) {
-  Mail* m = nullptr;
-  for (auto& x : mailbox) if (!x.used) { m = &x; break; }
-  if (!m) for (auto& x : mailbox) if (x.delivered) { m = &x; break; }
-  if (!m) { m = &mailbox[mailRR]; mailRR = (mailRR + 1) % MAIL_N; }   // full: drop round-robin
-  memset(m, 0, sizeof(*m));
-  m->used = true; m->mine = mine;
-  m->from = from; m->to = to; m->mid = mid; m->ts = ts;
-  m->next = millis() + RETRY_S[0] * 1000UL;
-  strncpy(m->name, name, NAME_MAX_LEN);
-  strncpy(m->text, text, TEXT_MAX_LEN);
-  return m;
+  stateDirty = true;
+  return mailbox.store(from, to, mid, ts, name, text, mine, millis());
 }
 
 // alert with empty text = cancel of the alert with that mid
@@ -327,6 +321,106 @@ static void sendAck(uint32_t recipient, uint32_t sender, uint32_t mid) {
   meshSend(T_ACK, recipient, sender, mid, "", "");
 }
 
+// ---------------------------------------------------------------- key derivation, identity
+// PBKDF2-HMAC-SHA256: makes guessing a weak passphrase from a captured packet slow.
+static void deriveKey(const char* pw, uint8_t out[32]) {
+  static const uint8_t salt[] = "BunkerNet-mesh-key-v1";
+  br_hmac_key_context kc;
+  br_hmac_context hc;
+  br_hmac_key_init(&kc, &br_sha256_vtable, pw, strlen(pw));
+  uint8_t u[32], t[32];
+  static const uint8_t one[4] = {0, 0, 0, 1};
+  br_hmac_init(&hc, &kc, 0);
+  br_hmac_update(&hc, salt, sizeof(salt) - 1);
+  br_hmac_update(&hc, one, 4);
+  br_hmac_out(&hc, u);
+  memcpy(t, u, 32);
+  for (uint32_t i = 1; i < PBKDF2_ITERS; i++) {
+    br_hmac_init(&hc, &kc, 0);
+    br_hmac_update(&hc, u, 32);
+    br_hmac_out(&hc, u);
+    for (uint8_t j = 0; j < 32; j++) t[j] ^= u[j];
+    if ((i & 255) == 0) yield();
+  }
+  memcpy(out, t, 32);
+}
+
+// A client proves it owns an id by sending its secret token; we only keep a short hash of it.
+static void tokenHash(const char* tok, uint8_t out[8]) {
+  br_sha256_context c; uint8_t d[32];
+  br_sha256_init(&c);
+  br_sha256_update(&c, "bunkernet-token:", 16);
+  br_sha256_update(&c, tok, strlen(tok));
+  br_sha256_out(&c, d);
+  memcpy(out, d, 8);
+}
+
+static void hashToHex(const uint8_t h[8], char out[17]) {
+  for (uint8_t i = 0; i < 8; i++) sprintf(out + i * 2, "%02x", h[i]);
+}
+static bool hexToHash(const char* s, uint8_t out[8]) {
+  if (strlen(s) != 16) return false;
+  for (uint8_t i = 0; i < 8; i++) {
+    char b[3] = {s[i * 2], s[i * 2 + 1], 0}; char* e;
+    out[i] = (uint8_t)strtoul(b, &e, 16);
+    if (*e) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- persistence (LittleFS)
+// Identity claims, stored private messages and the boot counter survive power loss.
+#define STATE_MAGIC 0x424E5333UL
+struct StateHdr { uint32_t magic, size, boot; };
+static const size_t STATE_SIZE = sizeof(StateHdr) + sizeof(bn::AuthEnt) * AUTH_N + sizeof(bn::Mail) * MAIL_N;
+
+static void saveState() {
+  File f = LittleFS.open("/state.tmp", "w");
+  if (!f) return;
+  StateHdr h = {STATE_MAGIC, (uint32_t)STATE_SIZE, bootCount};
+  bool ok = f.write((uint8_t*)&h, sizeof(h)) == sizeof(h);
+  ok = ok && f.write((uint8_t*)authTab.raw(), sizeof(bn::AuthEnt) * AUTH_N) == sizeof(bn::AuthEnt) * AUTH_N;
+  ok = ok && f.write((uint8_t*)mailbox.raw(), sizeof(bn::Mail) * MAIL_N) == sizeof(bn::Mail) * MAIL_N;
+  f.close();
+  if (ok && LittleFS.rename("/state.tmp", "/state.bin")) { stateDirty = false; lastSave = millis(); }
+  else LittleFS.remove("/state.tmp");
+}
+
+static void loadState() {
+  bool loaded = false;
+  if (LittleFS.begin()) {
+    File f = LittleFS.open("/state.bin", "r");
+    if (f) {
+      StateHdr h;
+      if (f.size() == STATE_SIZE && f.read((uint8_t*)&h, sizeof(h)) == sizeof(h) &&
+          h.magic == STATE_MAGIC && h.size == STATE_SIZE) {
+        f.read((uint8_t*)authTab.raw(), sizeof(bn::AuthEnt) * AUTH_N);
+        f.read((uint8_t*)mailbox.raw(), sizeof(bn::Mail) * MAIL_N);
+        bootCount = h.boot + 1;
+        loaded = true;
+      }
+      f.close();
+    }
+  } else {
+    MLOG("LittleFS mount failed, running without persistence\n");
+  }
+  if (!loaded) {
+    // No usable state (first boot, erased flash): start the counter high and random so peers,
+    // which remember the old counter, still accept this node as "rebooted", not "replayed".
+    bootCount = 1000 + rnd32() % 60000;
+    memset(authTab.raw(), 0, sizeof(bn::AuthEnt) * AUTH_N);
+    memset(mailbox.raw(), 0, sizeof(bn::Mail) * MAIL_N);
+  }
+  bn::Mail* m = mailbox.raw();
+  for (size_t i = 0; i < MAIL_N; i++) {              // re-arm retry timers relative to this boot
+    if (!m[i].used) continue;
+    uint8_t t = m[i].tries < bn::RETRY_N ? m[i].tries : bn::RETRY_N - 1;
+    m[i].next = millis() + bn::RETRY_S[t] * 1000UL;
+    m[i].lastAck = 0;
+  }
+  saveState();                                       // persist the new boot counter right away
+}
+
 // ---------------------------------------------------------------- rx handling
 static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origin) {
   if (n < PT_HDR) return;
@@ -357,9 +451,16 @@ static void handlePlain(const uint8_t* pt, size_t n, uint8_t ttl, uint32_t origi
       addLog(T_DM, from, to, mid, name, text, ts);
       break;
     }
-    case T_PRESENCE:
+    case T_PRESENCE: {
+      uint8_t th[8];
+      if (hexToHash(text, th)) {                  // presence carries the identity claim
+        bn::AuthTable<AUTH_N>::Result r = authTab.check(from, th);
+        if (r == bn::AuthTable<AUTH_N>::BAD) break;      // id already owned by someone else
+        if (r == bn::AuthTable<AUTH_N>::NEW) { authTab.learn(from, th); stateDirty = true; }
+      }
       touchUser(from, name, origin);
       break;
+    }
     case T_BEACON:
       touchNode(from, name, hops);
       break;
@@ -380,32 +481,35 @@ static void processRx() {
   while (rxTail != rxHead) {
     RxPkt& r = rxq[rxTail];
     uint8_t* d = r.d; uint8_t len = r.len;
-    bool ok = false;
     if (len >= OFF_PAYLOAD + TAG_LEN && d[0] == MAGIC) {
       uint8_t n = d[OFF_LEN];
-      uint32_t origin = get32(d + OFF_NONCE);
-      uint32_t h = fnv(d + OFF_NONCE, 12);
-      if (len == OFF_PAYLOAD + n + TAG_LEN && n >= PT_HDR && origin != myId && !isSeen(h)) {
-        uint8_t buf[PT_MAX], tag[TAG_LEN];
-        memcpy(buf, d + OFF_PAYLOAD, n);
-        br_poly1305_ctmul_run(meshKey, d + OFF_NONCE, buf, n, d + OFF_NONCE, 12,
-                              tag, br_chacha20_ct_run, 0);
-        uint8_t diff = 0;
-        for (uint8_t i = 0; i < TAG_LEN; i++) diff |= tag[i] ^ d[OFF_PAYLOAD + n + i];
-        if (diff == 0) {
-          ok = true;
-          markSeen(h);
-          uint8_t ttl = d[OFF_TTL];
-          if (ttl > 1) {                      // relay with random delay
-            d[OFF_TTL] = ttl - 1;
-            txEnqueue(d, len, millis() + 5 + rnd32() % 40);
+      uint32_t origin = get32(d + OFF_NONCE), boot = get32(d + OFF_NONCE + 4), seq = get32(d + OFF_NONCE + 8);
+      uint32_t now = millis();
+      if (len == OFF_PAYLOAD + n + TAG_LEN && n >= PT_HDR && origin != myId) {
+        uint32_t key = fnv(d + OFF_NONCE, 12);
+        if (!replay.check(origin, boot, seq, now)) {
+          noteDuplicate(key);                           // duplicate or replayed packet
+        } else {
+          uint8_t buf[PT_MAX], tag[TAG_LEN];
+          memcpy(buf, d + OFF_PAYLOAD, n);
+          br_poly1305_ctmul_run(meshKey, d + OFF_NONCE, buf, n, d + OFF_NONCE, 12,
+                                tag, br_chacha20_ct_run, 0);
+          uint8_t diff = 0;
+          for (uint8_t i = 0; i < TAG_LEN; i++) diff |= tag[i] ^ d[OFF_PAYLOAD + n + i];
+          if (diff == 0) {
+            replay.commit(origin, boot, seq, now);
+            uint8_t ttl = d[OFF_TTL];
+            if (ttl > 1) {                              // relay with random delay
+              d[OFF_TTL] = ttl - 1;
+              bool damp = buf[0] == T_BEACON || buf[0] == T_PRESENCE;
+              txEnqueue(d, len, now + 10 + rnd32() % 70, key, damp);
+            }
+            handlePlain(buf, n, ttl, origin);
+            led(true);
           }
-          handlePlain(buf, n, ttl, origin);
-          led(true);
         }
       }
     }
-    (void)ok;
     rxTail = (rxTail + 1) % RXQ_N;
   }
 }
@@ -421,6 +525,7 @@ static void onRecv(uint8_t* mac, uint8_t* data, uint8_t len) {
   rxHead = nx;
 }
 
+#if !RELAY_ONLY
 // ---------------------------------------------------------------- web helpers
 static void hex8(char* out, uint32_t v) { sprintf(out, "%08x", (unsigned)v); }
 static uint32_t argHex(const char* k) {
@@ -447,16 +552,31 @@ static void flushJson(String& o, bool force = false) {
   if (force || o.length() > 900) { server.sendContent(o); o = ""; }
 }
 
-static void registerClient() {
-  uint32_t me = argHex("me");
-  if (!me) return;
+// Every client request must prove it owns `me` with its secret token (`tok`).
+// The first claim for an id wins (trust on first use) and is flooded to the other nodes.
+static bool authClient(uint32_t me) {
+  String tok = server.arg("tok");
+  if (!me || tok.length() < 16 || tok.length() > 64) { server.send(403, "text/plain", "auth"); return false; }
+  uint8_t h[8];
+  tokenHash(tok.c_str(), h);
+  bn::AuthTable<AUTH_N>::Result r = authTab.check(me, h);
+  if (r == bn::AuthTable<AUTH_N>::BAD) { server.send(403, "text/plain", "auth"); return false; }
+  if (r == bn::AuthTable<AUTH_N>::NEW) { authTab.learn(me, h); stateDirty = true; }
   String nm = server.arg("name");
-  touchUser(me, nm.c_str(), myId);
+  User* u = touchUser(me, nm.c_str(), myId);
+  if (r == bn::AuthTable<AUTH_N>::NEW) u->needPresence = true;
+  return true;
+}
+
+static bool lowHeap() {
+  if (ESP.getFreeHeap() >= 5000) return false;
+  server.send(503, "text/plain", "busy");
+  return true;
 }
 
 static void handlePoll() {
-  registerClient();
   uint32_t me = argHex("me");
+  if (lowHeap() || !authClient(me)) return;
   uint32_t since = server.arg("since").toInt();
   uint32_t cdv = server.arg("dv").toInt();
   uint32_t cav = server.arg("av").toInt();
@@ -495,7 +615,9 @@ static void handlePoll() {
     flushJson(o);
   }
   // store-and-forward: DMs that were held for this user while they were away
-  for (auto& mm : mailbox) {
+  bn::Mail* mails = mailbox.raw();
+  for (size_t mi = 0; mi < MAIL_N; mi++) {
+    bn::Mail& mm = mails[mi];
     if (!mm.used || mm.delivered || mm.to != me) continue;
     sendAck(me, mm.from, mm.mid);
     if (comma) o += ',';
@@ -556,9 +678,9 @@ static void handlePoll() {
 }
 
 static void handleSend() {
-  registerClient();
   uint32_t me = argHex("me"), to = argHex("to");
-  if (!me || !server.hasArg("x")) { server.send(400, "text/plain", "bad"); return; }
+  if (lowHeap() || !authClient(me)) return;
+  if (!server.hasArg("x")) { server.send(400, "text/plain", "bad"); return; }
   String nm = server.arg("name"), x = server.arg("x");
   char name[NAME_MAX_LEN + 1], text[TEXT_MAX_LEN + 1];
   copyUtf8(name, nm.c_str(), nm.length(), NAME_MAX_LEN);
@@ -573,9 +695,9 @@ static void handleSend() {
 }
 
 static void handlePut() {
-  registerClient();
   uint32_t me = argHex("me");
-  if (!me || !server.hasArg("k")) { server.send(400, "text/plain", "bad"); return; }
+  if (lowHeap() || !authClient(me)) return;
+  if (!server.hasArg("k")) { server.send(400, "text/plain", "bad"); return; }
   String nm = server.arg("name"), k = server.arg("k"), v = server.arg("v");
   char name[NAME_MAX_LEN + 1], key[NAME_MAX_LEN + 1], val[48];
   copyUtf8(name, nm.c_str(), nm.length(), NAME_MAX_LEN);
@@ -589,9 +711,9 @@ static void handlePut() {
 }
 
 static void handleAlert() {
-  registerClient();
   uint32_t me = argHex("me");
-  if (!me || !server.hasArg("x")) { server.send(400, "text/plain", "bad"); return; }
+  if (lowHeap() || !authClient(me)) return;
+  if (!server.hasArg("x")) { server.send(400, "text/plain", "bad"); return; }
   String nm = server.arg("name"), x = server.arg("x");
   char name[NAME_MAX_LEN + 1], text[TEXT_MAX_LEN + 1];
   copyUtf8(name, nm.c_str(), nm.length(), NAME_MAX_LEN);
@@ -603,7 +725,8 @@ static void handleAlert() {
 
 static void handleAlertClear() {
   uint32_t me = argHex("me"), mid = argHex("m");
-  if (!me || !mid) { server.send(400, "text/plain", "bad"); return; }
+  if (!authClient(me)) return;
+  if (!mid) { server.send(400, "text/plain", "bad"); return; }
   setAlert(mid, me, "", "");
   meshSend(T_ALERT, me, 0, mid, "", "");
   server.send(200, "text/plain", "ok");
@@ -616,6 +739,7 @@ static void handleNodes() {
   o += "{\"id\":\""; o += (h + 4); o += "\",\"up\":"; o += millis() / 1000;
   o += ",\"heap\":"; o += ESP.getFreeHeap();
   o += ",\"clients\":"; o += WiFi.softAPgetStationNum();
+  o += ",\"defkey\":"; o += usingDefaultKey ? 1 : 0;
   o += ",\"nodes\":[{\"id\":\""; o += (h + 4); o += "\",\"n\":"; jesc(o, nodeName); o += ",\"h\":0,\"a\":0}";
   uint32_t now = millis();
   for (auto& n : nodes) {
@@ -641,6 +765,8 @@ static void handleNotFound() {
   server.send(302, "text/plain", "");
 }
 
+#endif  // !RELAY_ONLY
+
 // ---------------------------------------------------------------- setup / loop
 void setup() {
 #if DEBUG_SERIAL
@@ -654,27 +780,34 @@ void setup() {
   pinMode(SOS_PIN, INPUT_PULLUP);
 #endif
   myId = ESP.getChipId();
-  bootId = rnd32();
   snprintf(nodeName, sizeof(nodeName), "Node-%04X", (unsigned)(myId & 0xFFFF));
 
-  br_sha256_context sc;
-  br_sha256_init(&sc);
-  br_sha256_update(&sc, MESH_PSK, strlen(MESH_PSK));
-  br_sha256_out(&sc, meshKey);
+  usingDefaultKey = strcmp(MESH_PSK, "change-this-to-a-long-secret-phrase") == 0;
+  if (usingDefaultKey) MLOG("WARNING: default mesh key in use. Run tools/new-psk.sh\n");
+  else if (strlen(MESH_PSK) < 16) MLOG("WARNING: mesh key is short, use 16+ characters\n");
+  deriveKey(MESH_PSK, meshKey);
+  loadState();
 
   WiFi.persistent(false);
   WiFi.setAutoConnect(false);
+#if RELAY_ONLY
+  WiFi.mode(WIFI_STA);                       // relay-only: no access point, no web server
+  WiFi.disconnect();
+  wifi_set_channel(MESH_CHANNEL);
+#else
   WiFi.mode(WIFI_AP_STA);
   IPAddress ip(192, 168, 4, 1);
   WiFi.softAPConfig(ip, ip, IPAddress(255, 255, 255, 0));
   WiFi.softAP(MESH_SSID, AP_PASSWORD[0] ? AP_PASSWORD : nullptr, MESH_CHANNEL, 0, MAX_CLIENTS);
   WiFi.disconnect();
+#endif
 
   if (esp_now_init() != 0) { MLOG("esp_now_init failed\n"); delay(1000); ESP.restart(); }
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
   esp_now_add_peer((uint8_t*)BCAST, ESP_NOW_ROLE_COMBO, MESH_CHANNEL, NULL, 0);
   esp_now_register_recv_cb(onRecv);
 
+#if !RELAY_ONLY
   dns.start(53, "*", ip);
   server.on("/", handleRoot);
   server.on("/poll", handlePoll);
@@ -685,6 +818,7 @@ void setup() {
   server.on("/alertclear", handleAlertClear);
   server.onNotFound(handleNotFound);
   server.begin();
+#endif
 
   tBeacon = millis() + 1500 + rnd32() % 2000;
   tPresence = millis() + PRESENCE_MS;
@@ -692,14 +826,16 @@ void setup() {
 }
 
 void loop() {
+#if !RELAY_ONLY
   dns.processNextRequest();
   server.handleClient();
+#endif
   processRx();
   txPump();
 
   uint32_t now = millis();
   if ((int32_t)(now - tBeacon) >= 0) {
-    meshSend(T_BEACON, myId, 0, 0, nodeName, "");
+    meshSend(T_BEACON, myId, 0, 0, nodeName, "", 0, BEACON_TTL);
     tBeacon = now + BEACON_MS + rnd32() % 1000;
   }
   bool periodic = (int32_t)(now - tPresence) >= 0;
@@ -709,17 +845,17 @@ void loop() {
     if (now - u.seen > USER_TTL_MS) continue;
     if (u.needPresence || periodic) {
       u.needPresence = false;
-      meshSend(T_PRESENCE, u.id, 0, 0, u.name, "");
+      uint8_t th[8]; char hex[17] = "";
+      if (authTab.lookup(u.id, th)) hashToHex(th, hex);
+      meshSend(T_PRESENCE, u.id, 0, 0, u.name, hex);
     }
   }
-  for (auto& m : mailbox) {                       // back-off retries of our own undelivered DMs
-    if (m.used && m.mine && !m.delivered && (int32_t)(now - m.next) >= 0) {
-      meshSend(T_DM, m.from, m.to, m.mid, m.name, m.text, m.ts);
-      if (++m.tries >= RETRY_N) m.mine = false;
-      else m.next = now + RETRY_S[m.tries] * 1000UL;
-      break;                                      // at most one per loop pass
-    }
+  bn::Mail* due = mailbox.due(now);               // back-off retries of our own undelivered DMs
+  if (due) {
+    meshSend(T_DM, due->from, due->to, due->mid, due->name, due->text, due->ts);
+    mailbox.retried(due, now);                    // at most one per loop pass
   }
+  if (stateDirty && now - lastSave > STATE_SAVE_MS) saveState();
   if (rep.active && (int32_t)(now - rep.next) >= 0) {
     if (rep.left == 0) rep.active = false;
     else {

@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [esp01_1m, nodemcuv2]
+        env: [esp01_1m, esp01_relay, nodemcuv2]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/cache@v6
@@ -47,3 +47,12 @@ jobs:
           open('/tmp/ui.js', 'w').write(m.group(1))
           PY
           node --check /tmp/ui.js
+
+  native-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and run the logic tests
+        run: |
+          g++ -std=c++17 -O1 -Wall -Wextra -Werror tests/native/test_logic.cpp -o bn_test
+          ./bn_test
