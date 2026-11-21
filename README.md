@@ -213,6 +213,21 @@ of them in the git-ignored `config.local.h` (`tools/new-psk.sh` creates it):
   would let one bad file brick every node. Anyone who knows the password on the open
   Wi-Fi link can see it, so also set `AP_PASSWORD`.
 
+## Build and flash scripts
+
+```bash
+./tools/build.sh                    # build the ESP-01 firmware into dist/ (add: all, esp01_relay, nodemcuv2, --test)
+./tools/flash.sh                    # build and flash over USB-serial; finds the port, shows the node name
+./tools/flash.sh --bin dist/x.bin   # flash a prebuilt binary (esptool only, no PlatformIO)
+./tools/flash.sh -p /dev/ttyUSB0 -m # choose the port and open the serial monitor afterwards
+```
+
+`flash.sh` reads the module's MAC first and tells you the name it will appear under on the
+**Nodes** tab (for example `Node-3A7F`), so you can write it on a label. It refuses to flash a build
+that uses the public default key unless you pass `--allow-default-key`, and `--erase` wipes saved
+messages and identities. Both scripts work on macOS and Linux, use `--dry-run` / `--help` to look
+before you leap, and need a bash shell (on Windows use WSL or Git Bash).
+
 ## Printable join sheet
 
 Put a sheet next to the nodes so anyone can join without help: a Wi-Fi QR code, a QR code that
@@ -296,6 +311,8 @@ time and supply voltage as text (`<unix time>;<millivolts>`). See
 - The link between a phone and its node is open, plain HTTP unless you set `AP_PASSWORD`, so
   someone nearby could sniff a user's token and chat. **Set a WPA2 `AP_PASSWORD`** and share it
   with your people if that matters. Mesh traffic between nodes is always encrypted.
+- A node can track about 24 other nodes for replay protection (`REPLAY_N`, 16 bytes of RAM each);
+  raise it in `config.local.h` for a bigger mesh. New identities are limited to 8 per minute per node.
 - Each client may send at most 12 messages, data entries or alerts per 10 seconds (60 per node),
   so one phone, script or sensor can't flood the mesh. Over the limit the node answers `429`.
 - Identities are claimed on first use. If an attacker reaches a node and claims someone's id

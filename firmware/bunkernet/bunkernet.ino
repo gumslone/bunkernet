@@ -48,7 +48,9 @@ enum : uint8_t { T_CHAT = 1, T_DM = 2, T_PRESENCE = 3, T_BEACON = 4, T_ACK = 5, 
 
 #define RXQ_N   8
 #define TXQ_N   16
-#define REPLAY_N 24
+#ifndef REPLAY_N
+#define REPLAY_N 24      // origins tracked for replay protection: set to at least the number of nodes
+#endif
 #define AUTH_N  24
 #define STATE_SAVE_MS 60000UL
 #define PBKDF2_ITERS  4096
@@ -339,6 +341,20 @@ static void sendAck(uint32_t recipient, uint32_t sender, uint32_t mid) {
   meshSend(T_ACK, recipient, sender, mid, "", "");
 }
 
+// The phone confirms (`ak`) the private messages it has actually received. Only then are they
+// marked delivered and the receipt flooded, so a response lost on a weak link is sent again.
+static void ackDm(uint32_t me, uint32_t mid) {
+  Mail* m = findMail(mid);
+  if (m && m->to == me) { if (!m->delivered) sendAck(me, m->from, mid); return; }
+  for (auto& e : logRing) {
+    if (e.lid && e.type == T_DM && e.mid == mid && e.to == me && !e.acked && e.from != me) {
+      e.acked = true;
+      sendAck(me, e.from, mid);
+      return;
+    }
+  }
+}
+
 // ---------------------------------------------------------------- key derivation, identity
 // PBKDF2-HMAC-SHA256: makes guessing a weak passphrase from a captured packet slow.
 static void deriveKey(const char* pw, uint8_t out[32]) {
@@ -587,7 +603,11 @@ static bool authClient(uint32_t me) {
   tokenHash(tok.c_str(), h);
   bn::AuthTable<AUTH_N>::Result r = authTab.check(me, h);
   if (r == bn::AuthTable<AUTH_N>::BAD) { server.send(403, "text/plain", "auth"); return false; }
-  if (r == bn::AuthTable<AUTH_N>::NEW) { authTab.learn(me, h); stateDirty = true; }
+  if (r == bn::AuthTable<AUTH_N>::NEW) {
+    // new identities are limited per node, so nobody can churn through the identity and user tables
+    if (!limiter.allow(0xFFFFFFFEu, millis(), 8, 60000UL)) { server.send(429, "text/plain", "slow down"); return false; }
+    authTab.learn(me, h); stateDirty = true;
+  }
   if (server.hasArg("ts")) meshClock.feed(me, (uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10), millis());
   String nm = server.arg("name");
   User* u = findUser(me);
@@ -618,12 +638,15 @@ static void handlePoll() {
   uint32_t cdv = server.arg("dv").toInt();
   uint32_t cav = server.arg("av").toInt();
 
-  // issue delivery receipts for DMs addressed to this client
-  for (auto& e : logRing) {
-    if (e.lid && e.type == T_DM && e.to == me && !e.acked && e.from != me) {
-      e.acked = true;
-      sendAck(me, e.from, e.mid);
-    }
+  // delivery confirmations from this client (comma separated message ids)
+  String ak = server.arg("ak");
+  for (const char* p = ak.c_str(); *p;) {
+    char* end;
+    uint32_t mid = (uint32_t)strtoul(p, &end, 16);
+    if (end == p) break;
+    if (mid) ackDm(me, mid);
+    if (*end != ',') break;
+    p = end + 1;
   }
 
   beginJson();
@@ -657,8 +680,7 @@ static void handlePoll() {
   bn::Mail* mails = mailbox.raw();
   for (size_t mi = 0; mi < MAIL_N; mi++) {
     bn::Mail& mm = mails[mi];
-    if (!mm.used || mm.delivered || mm.to != me) continue;
-    sendAck(me, mm.from, mm.mid);
+    if (!mm.used || mm.delivered || mm.to != me) continue;   // sent again until the phone confirms
     if (comma) o += ',';
     comma = true;
     o += "{\"t\":2";

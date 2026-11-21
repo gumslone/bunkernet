@@ -33,6 +33,10 @@ and 2 phones**. Tick each item, and send back anything that fails together with 
       and the ⏳ becomes ✓✓.
 - [ ] **Survives a power cut:** send a message to an offline contact, then power-cycle every
       node that is up. Bring the recipient online. The message should still arrive.
+- [ ] **Delivery is confirmed by the phone:** send a private message to an offline contact, open
+      the page on the recipient and, as soon as the message appears, close the browser. The sender
+      should show ✓✓ within a few seconds. If the recipient's Wi-Fi drops right as it opens, the
+      message must reappear on the next visit instead of being lost.
 - [ ] **Privacy:** from a third device on the mesh Wi-Fi, run
       `curl -i "http://192.168.4.1/poll?me=<phone 2 id>&name=x&since=0"` (no `tok`). Expect
       `403`. Without the token, nobody else can read or send as that person.
