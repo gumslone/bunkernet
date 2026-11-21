@@ -191,6 +191,35 @@ class Mailbox {
 };
 
 // ---------------------------------------------------------------------------
+// Simple per-key rate limiter (fixed window). Stops one client from flooding the whole mesh.
+// Key 0 can be used for a node-wide bucket.
+// ---------------------------------------------------------------------------
+template <size_t N>
+class RateLimiter {
+ public:
+  bool allow(uint32_t key, uint32_t nowMs, uint16_t maxCount, uint32_t windowMs) {
+    E* e = nullptr;
+    for (auto& x : t_) if (x.used && x.key == key) { e = &x; break; }
+    if (!e) {
+      for (auto& x : t_) if (!x.used) { e = &x; break; }
+      if (!e) {                                           // full: reuse the entry with the oldest window
+        e = &t_[0];
+        for (auto& x : t_) if (nowMs - x.start > nowMs - e->start) e = &x;
+      }
+      e->used = true; e->key = key; e->start = nowMs; e->count = 0;
+    }
+    if (nowMs - e->start >= windowMs) { e->start = nowMs; e->count = 0; }
+    if (e->count >= maxCount) return false;
+    e->count++;
+    return true;
+  }
+
+ private:
+  struct E { bool used; uint32_t key, start; uint16_t count; };
+  E t_[N] = {};
+};
+
+// ---------------------------------------------------------------------------
 // Shared mesh clock. The nodes have no real-time clock, so they learn the time from the
 // phones and laptops that talk to them (and from each other's beacons). Every source gets one
 // vote (its newest reading), the median wins, and a single wrong device is outvoted.

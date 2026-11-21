@@ -130,7 +130,7 @@ async function poll(){if(busy||!name)return;busy=1;
  }catch(e){$('#st').className='bad';$('#st').textContent=t('reconnecting')}busy=0}
 function beep(){try{const c=new(window.AudioContext||window.webkitAudioContext)(),o=c.createOscillator();o.type='square';o.frequency.value=880;o.connect(c.destination);o.start();o.stop(c.currentTime+.6)}catch(e){}}
 function drawAl(){$('#al').innerHTML=alerts.filter(a=>!hidAl[a.m]).map(a=>'<div class="al"><span>🚨 '+E(a.n)+': '+E(a.x)+'</span><button data-h="'+a.m+'">'+t('ok')+'</button><button data-c="'+a.m+'">'+t('clearAll')+'</button></div>').join('');
- $('#al').querySelectorAll('button').forEach(b=>b.onclick=()=>{if(b.dataset.h){hidAl[b.dataset.h]=1;drawAl()}else{post('/alertclear',{me,m:b.dataset.c})}})}
+ $('#al').querySelectorAll('button').forEach(b=>b.onclick=()=>{if(b.dataset.h){hidAl[b.dataset.h]=1;drawAl()}else{post('/alertclear',{me,name,m:b.dataset.c})}})}
 $('#ab').onclick=()=>{alertMode=!alertMode;formState()};
 $('#pb').onclick=()=>{prioMode=!prioMode;formState()};
 async function post(u,o){o.tok=tok;lastAct=Date.now();try{await fetch(u,{method:'POST',body:new URLSearchParams(o)})}catch(e){}poll()}

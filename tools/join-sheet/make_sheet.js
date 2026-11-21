@@ -9,6 +9,9 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const QR = require('./qr.js');
 
+const LOGO_FILE = path.join(__dirname, '../../docs/logo.png');
+const LOGO = fs.existsSync(LOGO_FILE) ? 'data:image/png;base64,' + fs.readFileSync(LOGO_FILE).toString('base64') : '';
+
 const args = Object.fromEntries(process.argv.slice(2).reduce((a, x, i, all) => (x.startsWith('--') ? [...a, [x.slice(2), all[i + 1]]] : a), []));
 const SSID = args.ssid || 'BunkerNet';
 const PASSWORD = args.password || '';
@@ -97,7 +100,9 @@ function html(t) {
 @page { size: A4; margin: 11mm; }
 * { box-sizing: border-box; }
 body { margin: 0; font: 10.6pt/1.28 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #111; }
-header { border-bottom: 3px solid #111; padding-bottom: 6px; margin-bottom: 10px; }
+header { border-bottom: 3px solid #111; padding-bottom: 6px; margin-bottom: 10px; display: flex; align-items: center; gap: 14px; }
+.logo { height: 21mm; width: auto; flex: none; margin: -3mm 0; }
+header div { flex: 1; }
 h1 { margin: 0; font-size: 28pt; letter-spacing: .5px; }
 header p { margin: 2px 0 0; font-size: 12.5pt; color: #333; }
 .top { display: grid; grid-template-columns: 1fr 46mm; gap: 12px; }
@@ -117,7 +122,7 @@ ul { margin: 4px 0 0 18px; padding: 0; } li { margin: 2px 0; }
 .fill { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 8px; }
 .fill div { border-bottom: 1.5px solid #111; padding-top: 16px; font-size: 10.5pt; color: #333; }
 </style></head><body>
-<header><h1>BunkerNet</h1><p><b>${esc(t.title)}.</b> ${esc(t.sub)}</p></header>
+<header>${LOGO ? `<img class="logo" src="${LOGO}" alt="BunkerNet">` : '<h1>BunkerNet</h1>'}<div><p><b>${esc(t.title)}.</b> ${esc(t.sub)}</p></div></header>
 <div class="top">
  <div>
   <div class="step"><div class="num">1</div><div><h2>${esc(t.s1)}</h2>

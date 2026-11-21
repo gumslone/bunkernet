@@ -85,6 +85,7 @@ static bn::ReplayTable<REPLAY_N> replay;
 static bn::AuthTable<AUTH_N> authTab;
 static bn::Mailbox<MAIL_N> mailbox;
 static bn::MeshClock meshClock;
+static bn::RateLimiter<8> limiter;
 static bool stateDirty = false;
 static uint32_t lastSave = 0;
 using bn::Mail;
@@ -237,8 +238,10 @@ static User* touchUser(uint32_t id, const char* name, uint32_t node) {
     memset(u, 0, sizeof(*u));
     u->id = id; u->needPresence = (node == myId);
   }
-  if (node == myId && strncmp(u->name, name, NAME_MAX_LEN) != 0) u->needPresence = true;
-  copyUtf8(u->name, name, strlen(name), NAME_MAX_LEN);
+  char clean[NAME_MAX_LEN + 1];                       // compare the stored (UTF-8 safe) form
+  copyUtf8(clean, name, strlen(name), NAME_MAX_LEN);
+  if (node == myId && strcmp(u->name, clean) != 0) u->needPresence = true;
+  memcpy(u->name, clean, sizeof(clean));
   u->node = node; u->seen = now;
   return u;
 }
@@ -270,8 +273,8 @@ static void setData(uint32_t from, const char* k, const char* v, uint32_t ts) {
   if (!e) for (auto& d : board) if (!d.used) { e = &d; break; }
   if (!e) e = &board[rnd32() % DATA_N];          // board full: replace a random entry
   e->used = true; e->from = from; e->ts = ts;
-  strncpy(e->k, k, NAME_MAX_LEN); e->k[NAME_MAX_LEN] = 0;
-  strncpy(e->v, v, sizeof(e->v) - 1); e->v[sizeof(e->v) - 1] = 0;
+  copyUtf8(e->k, k, strlen(k), NAME_MAX_LEN);
+  copyUtf8(e->v, v, strlen(v), sizeof(e->v) - 1);   // never cut a UTF-8 character in half
   dataVer++;
 }
 
@@ -587,13 +590,23 @@ static bool authClient(uint32_t me) {
   if (r == bn::AuthTable<AUTH_N>::NEW) { authTab.learn(me, h); stateDirty = true; }
   if (server.hasArg("ts")) meshClock.feed(me, (uint32_t)strtoul(server.arg("ts").c_str(), nullptr, 10), millis());
   String nm = server.arg("name");
-  User* u = touchUser(me, nm.c_str(), myId);
+  User* u = findUser(me);
+  if (u && !nm.length()) { u->node = myId; u->seen = millis(); }   // request without a name keeps the old one
+  else u = touchUser(me, nm.length() ? nm.c_str() : "?", myId);
   if (r == bn::AuthTable<AUTH_N>::NEW) u->needPresence = true;
   return true;
 }
 
+// Writes that go out on the mesh are limited per client and per node, so one phone cannot flood everyone.
+static bool rateOk(uint32_t me) {
+  uint32_t now = millis();
+  if (limiter.allow(me, now, 12, 10000UL) && limiter.allow(0, now, 60, 10000UL)) return true;
+  server.send(429, "text/plain", "slow down");
+  return false;
+}
+
 static bool lowHeap() {
-  if (ESP.getFreeHeap() >= 5000) return false;
+  if (ESP.getFreeHeap() >= 5000 && ESP.getMaxFreeBlockSize() >= 2500) return false;
   server.send(503, "text/plain", "busy");
   return true;
 }
@@ -706,7 +719,7 @@ static void handlePoll() {
 
 static void handleSend() {
   uint32_t me = argHex("me"), to = argHex("to");
-  if (lowHeap() || !authClient(me)) return;
+  if (lowHeap() || !authClient(me) || !rateOk(me)) return;
   if (!server.hasArg("x")) { server.send(400, "text/plain", "bad"); return; }
   String nm = server.arg("name"), x = server.arg("x");
   char name[NAME_MAX_LEN + 1], text[TEXT_MAX_LEN + 1];
@@ -726,7 +739,7 @@ static void handleSend() {
 
 static void handlePut() {
   uint32_t me = argHex("me");
-  if (lowHeap() || !authClient(me)) return;
+  if (lowHeap() || !authClient(me) || !rateOk(me)) return;
   if (!server.hasArg("k")) { server.send(400, "text/plain", "bad"); return; }
   String nm = server.arg("name"), k = server.arg("k"), v = server.arg("v");
   char name[NAME_MAX_LEN + 1], key[NAME_MAX_LEN + 1], val[48];
@@ -742,7 +755,7 @@ static void handlePut() {
 
 static void handleAlert() {
   uint32_t me = argHex("me");
-  if (lowHeap() || !authClient(me)) return;
+  if (lowHeap() || !authClient(me) || !rateOk(me)) return;
   if (!server.hasArg("x")) { server.send(400, "text/plain", "bad"); return; }
   String nm = server.arg("name"), x = server.arg("x");
   char name[NAME_MAX_LEN + 1], text[TEXT_MAX_LEN + 1];
@@ -755,7 +768,7 @@ static void handleAlert() {
 
 static void handleAlertClear() {
   uint32_t me = argHex("me"), mid = argHex("m");
-  if (!authClient(me)) return;
+  if (!authClient(me) || !rateOk(me)) return;
   if (!mid) { server.send(400, "text/plain", "bad"); return; }
   setAlert(mid, me, "", "");
   meshSend(T_ALERT, me, 0, mid, "", "");
@@ -818,7 +831,6 @@ void setup() {
   if (usingDefaultKey) MLOG("WARNING: default mesh key in use. Run tools/new-psk.sh\n");
   else if (strlen(MESH_PSK) < 16) MLOG("WARNING: mesh key is short, use 16+ characters\n");
   deriveKey(MESH_PSK, meshKey);
-  loadState();
 
 #if MESH_PHY_11B
   wifi_set_phy_mode(PHY_MODE_11B);          // experimental: slower but more sensitive radio mode
@@ -838,6 +850,7 @@ void setup() {
 #endif
 
   WiFi.setOutputPower(TX_POWER_DBM);
+  loadState();                               // after the radio is on: the hardware RNG needs it
   if (esp_now_init() != 0) { MLOG("esp_now_init failed\n"); delay(1000); ESP.restart(); }
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
   esp_now_add_peer((uint8_t*)BCAST, ESP_NOW_ROLE_COMBO, MESH_CHANNEL, NULL, 0);

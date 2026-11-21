@@ -45,6 +45,8 @@ and 2 phones**. Tick each item, and send back anything that fails together with 
 - [ ] **Data board:** set `water = 60%` on phone 1. It appears on phone 2 with the right time.
 - [ ] **Cyrillic and emoji:** send an 80-letter Ukrainian message, then a long one with emoji.
       Nothing should be cut mid-character, and the byte counter appears near the limit.
+- [ ] **Rate limit:** send 15 short messages in a few seconds. The extra ones are refused and
+      chat keeps working normally afterwards.
 - [ ] **Name change:** tap your name, rename. Others see the new name within ~15 s.
 - [ ] **Relay-only:** flash a fourth module with `pio run -e esp01_relay -t upload`. It
       should appear on the **Nodes** tab, relay messages, and show no Wi-Fi network.

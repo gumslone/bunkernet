@@ -127,6 +127,29 @@ static void test_mailbox() {
   CHECK(!gm->mine);
 }
 
+// ----------------------------------------------------------------- rate limiter
+static void test_rate() {
+  bn::RateLimiter<3> r;
+  for (int i = 0; i < 5; i++) CHECK(r.allow(1, 1000 + i, 5, 10000));
+  CHECK(!r.allow(1, 1100, 5, 10000));                    // 6th in the window is refused
+  CHECK(r.allow(2, 1100, 5, 10000));                     // another client is unaffected
+  CHECK(r.allow(1, 11001, 5, 10000));                    // the window rolls over
+  for (int i = 0; i < 4; i++) CHECK(r.allow(1, 11002 + i, 5, 10000));
+  CHECK(!r.allow(1, 11010, 5, 10000));
+
+  // more clients than slots: nobody gets stuck, the oldest entry is reused
+  bn::RateLimiter<2> s;
+  CHECK(s.allow(1, 0, 1, 10000)); CHECK(s.allow(2, 1, 1, 10000));
+  CHECK(s.allow(3, 2, 1, 10000));
+  CHECK(!s.allow(3, 3, 1, 10000));
+
+  // millis() wrap-around
+  bn::RateLimiter<2> w;
+  CHECK(w.allow(7, 0xFFFFFFF0u, 1, 1000));
+  CHECK(!w.allow(7, 0xFFFFFFF8u, 1, 1000));
+  CHECK(w.allow(7, 0xFFFFFFF0u + 2000u, 1, 1000));       // 2 s later, across the wrap
+}
+
 // ----------------------------------------------------------------- clock
 static void test_clock() {
   const uint32_t T0 = 1800000000UL;                       // some plausible Unix time
@@ -295,6 +318,7 @@ int main() {
   test_replay();
   test_auth();
   test_mailbox();
+  test_rate();
   test_clock();
   test_flood();
   if (failures) { std::printf("%d check(s) FAILED\n", failures); return 1; }

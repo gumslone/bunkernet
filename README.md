@@ -296,6 +296,8 @@ time and supply voltage as text (`<unix time>;<millivolts>`). See
 - The link between a phone and its node is open, plain HTTP unless you set `AP_PASSWORD`, so
   someone nearby could sniff a user's token and chat. **Set a WPA2 `AP_PASSWORD`** and share it
   with your people if that matters. Mesh traffic between nodes is always encrypted.
+- Each client may send at most 12 messages, data entries or alerts per 10 seconds (60 per node),
+  so one phone, script or sensor can't flood the mesh. Over the limit the node answers `429`.
 - Identities are claimed on first use. If an attacker reaches a node and claims someone's id
   before that person's own claim has spread, the real owner is locked out on that node and the
   page quietly gives them a new identity. It is an unlikely race, but not impossible.
