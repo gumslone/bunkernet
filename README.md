@@ -1,7 +1,13 @@
-# BunkerNet
+<p align="center">
+  <img src="docs/logo.png" alt="BunkerNet" width="460">
+</p>
+
+<p align="center">
 
 [![CI](https://github.com/gumslone/bunkernet/actions/workflows/ci.yml/badge.svg)](https://github.com/gumslone/bunkernet/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+</p>
 
 An offline, self-healing communication mesh for cheap **ESP-01 / ESP8266** modules. It works
 with no internet, no router and no app install.
